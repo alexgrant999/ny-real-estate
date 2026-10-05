@@ -1,16 +1,16 @@
 /**
- * Imports active Redfin listings (sales and rentals) for the Catskills towns into SQLite.
+ * Imports active Redfin sale listings for the Catskills towns into SQLite (rentals opt-in).
  *
  * Redfin serves its search results as JSON to ordinary browsers, keyed by zip code
  * region. No API key is needed. Every town in src/lib/areas.ts carries the Redfin
  * region id for its zip.
  *
  * Usage:
- *   npx tsx scripts/scrape-redfin.ts                          # all active towns, sales + rentals
+ *   npx tsx scripts/scrape-redfin.ts                          # all active towns, sales only
  *   npx tsx scripts/scrape-redfin.ts --towns woodstock,hunter # specific towns (slugs)
  *   npx tsx scripts/scrape-redfin.ts --region tannersville    # one region only
  *   npx tsx scripts/scrape-redfin.ts --all-towns              # every town, including inactive ones
- *   npx tsx scripts/scrape-redfin.ts --sale-only | --rental-only
+ *   npx tsx scripts/scrape-redfin.ts --rentals | --rental-only # include rentals / rentals only
  *   npx tsx scripts/scrape-redfin.ts --no-details             # skip per-listing price history / tax fetch
  *   npx tsx scripts/scrape-redfin.ts --details-limit 40       # cap detail fetches per run (default 120)
  *   npx tsx scripts/scrape-redfin.ts --debug                  # dump raw payloads to data/
@@ -42,7 +42,7 @@ const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(name);
 const opt = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 
-const saleOnly = flag('--sale-only');
+const withRentals = flag('--rentals');
 const rentalOnly = flag('--rental-only');
 const noDetails = flag('--no-details');
 const debugMode = flag('--debug');
@@ -410,7 +410,7 @@ async function main() {
 
   const categories: ('sale' | 'rental')[] = [];
   if (!rentalOnly) categories.push('sale');
-  if (!saleOnly) categories.push('rental');
+  if (rentalOnly || withRentals) categories.push('rental');
 
   console.log(`Importing ${towns.length} town(s): ${towns.map(t => t.slug).join(', ')}`);
   console.log(`Categories: ${categories.join(', ')}\n`);

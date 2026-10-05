@@ -3,7 +3,7 @@
  *
  * Usage:
  *   npx tsx scripts/import.ts               # runs redfin
- *   npx tsx scripts/import.ts redfin        # Redfin scrape (sales + rentals, no key needed)
+ *   npx tsx scripts/import.ts redfin        # Redfin scrape (sales only by default, no key needed)
  *   npx tsx scripts/import.ts zillow        # Zillow via RapidAPI (needs RAPIDAPI_KEY)
  *   npx tsx scripts/import.ts demo          # seed demo data
  *   npx tsx scripts/import.ts redfin --log-id 12   # finalise an import_logs row created elsewhere

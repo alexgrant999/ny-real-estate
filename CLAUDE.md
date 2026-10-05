@@ -78,7 +78,7 @@ src/
   instrumentation.ts            # Runs runMigrations() on Next.js startup (local only)
 
 scripts/
-  scrape-redfin.ts              # Primary importer (sales + rentals, price history, taxes, off-market)
+  scrape-redfin.ts              # Primary importer (sales by default, --rentals opts in; price history, taxes, off-market)
   import.ts                     # Orchestrator: redfin (default) | zillow | demo
   seed-demo.ts                  # ~300 fake Catskills listings + benchmarks + 12 months of trends
   compute-benchmarks.ts         # Median $/sqft and price per town → neighborhood_benchmarks

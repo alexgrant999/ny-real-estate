@@ -125,7 +125,7 @@ export default function ImportPage() {
               <span className="text-xs font-normal px-2 py-0.5 bg-green-100 text-green-700 rounded-full">live data</span>
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              Pulls active for-sale and rental listings from Redfin for the selected towns. No API key needed.
+              Pulls active for-sale listings from Redfin for the selected towns. No API key needed.
             </p>
             <ul className="mt-1 text-xs text-gray-400 space-y-0.5">
               <li>~1.5s between requests · price changes recorded as history · taxes and MLS price history fetched for new listings</li>
