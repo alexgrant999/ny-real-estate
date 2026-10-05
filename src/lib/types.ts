@@ -90,8 +90,6 @@ export interface ListingFilters {
   listingType?: string;
   sortBy?: 'price' | 'dom' | 'price_reduction_pct' | 'price_reduction_amount' | 'price_per_sqft' | 'sqft' | 'lot_sqft';
   sortDir?: 'asc' | 'desc';
-  page?: number;
-  pageSize?: number;
   // Bounding box (map draw-a-box)
   swLat?: number;
   swLng?: number;

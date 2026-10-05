@@ -88,8 +88,6 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
   };
   const sortCol = sortColumnMap[filters.sortBy ?? 'price'] ?? 'l.price';
   const sortDir = filters.sortDir === 'desc' ? 'DESC' : 'ASC';
-  const pageSize = filters.pageSize ?? 50;
-  const offset = ((filters.page ?? 1) - 1) * pageSize;
 
   const sql = `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
@@ -97,12 +95,11 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
     ${BENCHMARK_JOIN}
     WHERE ${whereClause}
     ORDER BY ${sortCol} ${sortDir} NULLS LAST, l.id ASC
-    LIMIT ? OFFSET ?
   `;
 
   const countSql = `SELECT COUNT(*) as count FROM listings l WHERE ${whereClause}`;
 
-  const listings = db.prepare(sql).all(...params, pageSize, offset) as Listing[];
+  const listings = db.prepare(sql).all(...params) as Listing[];
   const { count } = db.prepare(countSql).get(...params) as { count: number };
 
   return { listings, total: count };

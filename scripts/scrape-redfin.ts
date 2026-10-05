@@ -183,7 +183,9 @@ const num = (x: unknown): number | null => {
 };
 const str = (x: unknown): string | null => {
   const v = val<unknown>(x);
-  return v === null || v === undefined ? null : String(v);
+  // Wrapper objects sometimes arrive without a value key; never stringify those.
+  if (v === null || v === undefined || typeof v === 'object') return null;
+  return String(v);
 };
 
 // Redfin's uiPropertyType codes, confirmed against the CSV export's labels.
@@ -247,14 +249,22 @@ function photoUrl(dataSourceId: unknown, mlsId: unknown): string | null {
 function parseSaleHome(h: Dict): Scraped | null {
   const propertyId = str(h.propertyId);
   const price = num(h.price);
-  const address = str(h.streetLine);
+  let address = str(h.streetLine);
   if (!propertyId || !price || !address) return null;
+  // streetLine usually already carries the unit; keep it out of the unit column.
+  let unit = str(h.unitNumber);
+  if (unit && /,\s*[A-Z]{2}\b/.test(unit)) unit = null; // city/state blobs Redfin sometimes puts here
+  if (unit) {
+    const esc = unit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    address = address.replace(new RegExp(`\\s*#?${esc}$`, 'i'), '').trim() || address;
+    unit = unit.replace(/^(Apt|Unit|Ste|#)\s*/i, '') || null;
+  }
   const latLong = val<{ latitude?: number; longitude?: number }>(h.latLong);
   const urlPath = str(h.url) ?? '';
   return {
     external_id: `rf-${propertyId}`,
     address,
-    unit: str(h.unitNumber),
+    unit,
     city: str(h.city),
     zip: str(h.zip) ?? str(h.postalCode) ?? '',
     lat: latLong?.latitude ?? null,

@@ -2,6 +2,7 @@ import { getListingById, getPriceHistory } from '@/lib/queries/listings';
 import { notFound } from 'next/navigation';
 import { Badge } from '@/components/ui/Badge';
 import { PriceHistoryChart } from '@/components/charts/PriceHistoryChart';
+import { PhotoGallery } from '@/components/listings/PhotoGallery';
 import { formatPriceFull, formatPrice, formatRentalPrice, domColor, domLabel, bedsLabel, lotLabel, redfinSearchUrl, zillowSearchUrl, availableLabel } from '@/lib/utils';
 import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
@@ -21,6 +22,9 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {listing.image_url && (
+          <PhotoGallery imageUrl={listing.image_url} alt={listing.address} />
+        )}
         <div className="p-6 border-b border-gray-100">
           <div className="flex items-start justify-between gap-4">
             <div>

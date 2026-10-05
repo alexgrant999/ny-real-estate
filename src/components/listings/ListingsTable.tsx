@@ -47,8 +47,6 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
   const [loading, setLoading] = useState(false);
   const [compareIds, setCompareIds] = useState<Set<number>>(new Set());
 
-  const page = Number(sp.get('page') ?? 1);
-  const pageSize = 50;
   const sortBy = sp.get('sortBy') ?? 'price';
   const sortDir = sp.get('sortDir') ?? 'asc';
 
@@ -60,7 +58,6 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
       params.set('sortBy', col);
       params.set('sortDir', 'asc');
     }
-    params.set('page', '1');
     router.push(`/listings?${params.toString()}`);
   };
 
@@ -84,14 +81,6 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
       else if (next.size < 4) next.add(id);
       return next;
     });
-  };
-
-  const totalPages = Math.ceil(total / pageSize);
-
-  const updatePage = (p: number) => {
-    const params = new URLSearchParams(sp.toString());
-    params.set('page', String(p));
-    router.push(`/listings?${params.toString()}`);
   };
 
   return (
@@ -272,26 +261,6 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
         </table>
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2 py-4 text-sm border-t border-gray-200">
-          <button
-            onClick={() => updatePage(page - 1)}
-            disabled={page <= 1}
-            className="px-3 py-1.5 rounded border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
-          >
-            Previous
-          </button>
-          <span className="text-gray-600">Page {page} of {totalPages}</span>
-          <button
-            onClick={() => updatePage(page + 1)}
-            disabled={page >= totalPages}
-            className="px-3 py-1.5 rounded border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
-          >
-            Next
-          </button>
-        </div>
-      )}
     </div>
   );
 }

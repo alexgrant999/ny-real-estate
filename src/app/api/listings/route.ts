@@ -26,8 +26,6 @@ export async function GET(req: NextRequest) {
     listingType: sp.get('listingType') || undefined,
     sortBy: (sp.get('sortBy') as ListingFilters['sortBy']) || 'price',
     sortDir: (sp.get('sortDir') as ListingFilters['sortDir']) || 'asc',
-    page: sp.get('page') ? Number(sp.get('page')) : 1,
-    pageSize: sp.get('pageSize') ? Number(sp.get('pageSize')) : 50,
     swLat: sp.get('swLat') ? Number(sp.get('swLat')) : undefined,
     swLng: sp.get('swLng') ? Number(sp.get('swLng')) : undefined,
     neLat: sp.get('neLat') ? Number(sp.get('neLat')) : undefined,
@@ -39,5 +37,5 @@ export async function GET(req: NextRequest) {
   const towns = getDistinctTowns();
   const stats = getListingStats();
 
-  return NextResponse.json({ listings, total, towns, stats, page: filters.page, pageSize: filters.pageSize });
+  return NextResponse.json({ listings, total, towns, stats });
 }

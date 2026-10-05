@@ -23,8 +23,6 @@ export default async function ListingsPage({ searchParams }: PageProps) {
     listingType: searchParams.listingType || undefined,
     sortBy: (searchParams.sortBy as ListingFilters['sortBy']) || 'price',
     sortDir: (searchParams.sortDir as ListingFilters['sortDir']) || 'asc',
-    page: searchParams.page ? Number(searchParams.page) : 1,
-    pageSize: 50,
   };
 
   const { listings, total } = getListings(filters);

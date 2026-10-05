@@ -123,7 +123,7 @@ export default function MapView() {
   // Fetch listings
   const fetchListings = useCallback((b: Bounds | null, cat: ListingCategory | 'all') => {
     setLoading(true);
-    const params = new URLSearchParams({ pageSize: '2000', category: cat, noPriceCap: 'true' });
+    const params = new URLSearchParams({ category: cat, noPriceCap: 'true' });
     if (b) {
       params.set('swLat', b.swLat.toFixed(6));
       params.set('swLng', b.swLng.toFixed(6));
