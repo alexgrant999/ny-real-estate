@@ -1,5 +1,5 @@
 {
-  "name": "real-estate-app",
+  "name": "catskills-homes",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "scrape": "tsx scripts/scrape-redfin.ts",
     "import": "tsx scripts/import.ts",
     "seed": "tsx scripts/seed-demo.ts",
-    "import-market": "tsx scripts/import-market-data.ts",
-    "scrape": "tsx scripts/scrape-streeteasy.ts",
+    "benchmarks": "tsx scripts/compute-benchmarks.ts",
+    "snapshot": "tsx scripts/snapshot-market.ts",
+    "rollup": "tsx scripts/rollup-price-history.ts",
     "geocode": "tsx scripts/geocode.ts",
     "predeploy-db": "tsx scripts/predeploy-db.ts",
     "deploy": "tsx scripts/predeploy-db.ts && vercel --prod"

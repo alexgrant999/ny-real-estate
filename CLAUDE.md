@@ -1,27 +1,39 @@
-# NYC Real Estate
+# Catskills Homes
 
-NYC apartment deal finder. Imports listings from StreetEasy (and optionally Zillow) via RapidAPI, tracks price history, surfaces deals via preset queries, compares listings side-by-side, and visualises market trends with Recharts. Personal tool — no auth, no multi-user.
+Deal finder for homes and land in the Woodstock and Tannersville areas of the Catskills (Ulster and Greene counties, NY). Imports active listings from Redfin, tracks price history across imports, surfaces deals via preset queries, compares listings side by side, maps them, and charts market trends from its own monthly snapshots. Personal tool — no auth, no multi-user.
+
+Forked from the NYC apartment finder (`alexgrant999/real-estate`). Same stack and page structure; geography, data source and property model are different: houses and acreage, not apartments.
 
 ## Claude Brain
 
 At the start of every session, load project context from the central intelligence layer:
 
 ```bash
-cd /Users/alexgrant/development/claude-brain && npm run context real-estate
+cd /Users/alexgrant/development/claude-brain && npm run context ny-real-estate
 ```
 
-This outputs all stored instructions, how-to guides, prompt profiles, and preferences for this project. Treat the output as additional context for the session.
+Treat the output as additional context for the session (the brain client lives in `src/lib/brain.ts`; it is not used by the app itself).
 
 ## Tech Stack
 
-- **Framework**: Next.js 14.2.35 (App Router) + TypeScript strict
+- **Framework**: Next.js 14.2 (App Router) + TypeScript strict
 - **Styling**: Tailwind CSS v3.4 — utilities only, no component libraries
-- **Database**: SQLite via `better-sqlite3` 12.8 (local file: `data/apartments.db`)
-- **Charts**: Recharts 3.8
+- **Database**: SQLite via `better-sqlite3` (local file: `data/apartments.db`)
+- **Charts**: Recharts 3 · **Map**: Leaflet 1.9 (client-only)
 - **No ORM** — direct SQL with prepared statements
 - **Scripts**: `tsx` for running TypeScript scripts outside Next.js
-- **Claude Brain client**: `postgres` 3.4 for connecting to central brain DB
 - **Import alias**: `@/*` → `src/*`
+
+## Geography model
+
+`src/lib/areas.ts` is the single source of truth.
+
+- **Region** (`listings.region`): `'Woodstock'` (Ulster side, Route 28 corridor, Ashokan hamlets) or `'Tannersville'` (Greene mountaintop down to Palenville). Labels via `REGION_LABELS` ("Woodstock area" / "Tannersville area"). This replaces the NYC app's `borough`.
+- **Town** (`listings.neighborhood`): the post-office name, e.g. "Bearsville". The column keeps its old name; the UI says "Town".
+- **`TOWNS`**: one entry per zip code with `slug`, `name`, `zip`, `region`, `redfinRegionId`, `lat`, `lng`, `active`. `active` controls what the default import scrapes. `redfinRegionId` is Redfin's id for the zip (region_type 2), resolved from their location autocomplete; stable.
+- Helpers: `regionFor(zip, city)`, `townNameFor(zip, city)`, `townBySlug`, `townByZip`, `TOWNS_BY_REGION`.
+
+`src/lib/config.ts` holds the non-geographic knobs: `APP_NAME`, default price caps for the "All" view (`DEFAULT_SALE_CAP`, `DEFAULT_RENT_CAP`), `MAP_CENTER`/`MAP_ZOOM`, and the scraper User-Agent.
 
 ## Project Structure
 
@@ -30,202 +42,122 @@ src/
   app/
     page.tsx                    # Redirects to /listings
     layout.tsx                  # Root layout with Navbar
-    globals.css                 # Tailwind base styles
     listings/page.tsx           # Browse + filter (server component)
-    deals/page.tsx              # Deal presets (server component)
+    map/page.tsx                # Leaflet map (client, dynamic import)
+    deals/page.tsx              # Deal presets (server)
     compare/page.tsx            # Side-by-side up to 4 listings (server)
-    market/page.tsx             # Market trends dashboard (client)
+    market/page.tsx             # Market trends from monthly snapshots (client)
     listing/[id]/page.tsx       # Detail view (server)
-    import/page.tsx             # Import UI (client)
+    import/page.tsx             # Import UI with town toggles + live log (client)
     api/
-      listings/route.ts         # GET — filtered listings + stats + neighborhoods
-      listings/[id]/route.ts    # GET — single listing by ID
+      listings/route.ts         # GET — filtered listings + stats + towns
+      listings/[id]/route.ts    # GET — single listing
       deals/route.ts            # GET — deal presets + counts
       market-trends/route.ts    # GET — areas, trend data, count
-      price-history/[id]/route.ts # GET — price history for a listing
-      import/route.ts           # GET logs, POST spawns import script
-      import/test/route.ts      # GET — test StreetEasy API key
+      price-history/[id]/route.ts
+      import/route.ts           # GET logs, POST spawns scrape-redfin.ts (or seed-demo.ts)
+      import/log/route.ts       # GET — tail of a running import's log file
+      import/test/route.ts      # GET — checks Redfin answers from this machine
   components/
-    ui/Badge.tsx                # Reusable badge (color variants)
-    nav/Navbar.tsx              # Sticky top nav (client — usePathname)
+    ui/Badge.tsx
+    nav/Navbar.tsx
     listings/ListingsTable.tsx  # Client — sort, paginate, compare checkboxes
-    listings/ListingsFilters.tsx # Client — URL-driven filter controls
-    charts/PriceHistoryChart.tsx # Client — Recharts line chart for price events
+    listings/ListingsFilters.tsx # Client — URL-driven filters (region, town, beds, price, DOM, type, min acres)
+    map/MapView.tsx             # Client — markers, draw-a-box, town labels
+    charts/PriceHistoryChart.tsx
   lib/
-    db.ts                       # Singleton SQLite connection (WAL mode, FK on)
-    schema.ts                   # Table creation + runMigrations()
-    types.ts                    # Listing, PriceHistoryEntry, ListingFilters, DealPreset, etc.
-    utils.ts                    # formatPrice, domColor, bedsLabel, streetEasyUrl, zillowSearchUrl
-    brain.ts                    # Claude Brain TypeScript client (postgres)
-    brain-types.ts              # Brain type definitions
-    queries/
-      listings.ts               # getListings, getListingById, getDealListings, getDealCounts, etc.
-      market.ts                 # getMarketAreas, getMarketTrend, getMarketTrendCount
-  instrumentation.ts            # Runs runMigrations() on Next.js startup
+    areas.ts                    # Regions, towns, Redfin ids (see above)
+    config.ts                   # App name, price caps, map centre, UA
+    db.ts                       # Singleton SQLite connection (WAL, FK on; read-only on Vercel)
+    schema.ts                   # SCHEMA_SQL + applySchema(db) + runMigrations()
+    types.ts                    # Listing, ListingFilters, ListingType, DealPreset, ...
+    utils.ts                    # formatPrice, lotLabel (acres), domColor, redfinSearchUrl, zillowSearchUrl
+    queries/listings.ts         # getListings, getListingById, getDealListings, getDistinctTowns, ...
+    queries/market.ts           # getMarketAreas, getMarketTrend, getMarketTrendCount
+    brain.ts / brain-types.ts   # Claude Brain client (unused by the app)
+  instrumentation.ts            # Runs runMigrations() on Next.js startup (local only)
 
 scripts/
-  import.ts                     # Orchestrates import (loads .env.local manually)
-  seed-demo.ts                  # ~200 fake listings + benchmarks
-  import-market-data.ts         # Imports StreetEasy CSVs from local folder
-  importers/
-    streeteasy.ts               # RapidAPI ST Easy fetcher (dual-pass: listed + price_reduction)
-    zillow.ts                   # RapidAPI Zillow fetcher (search + detail phases)
+  scrape-redfin.ts              # Primary importer (sales + rentals, price history, taxes, off-market)
+  import.ts                     # Orchestrator: redfin (default) | zillow | demo
+  seed-demo.ts                  # ~300 fake Catskills listings + benchmarks + 12 months of trends
+  compute-benchmarks.ts         # Median $/sqft and price per town → neighborhood_benchmarks
+  snapshot-market.ts            # Monthly metrics per town/region/all → market_trends
+  rollup-price-history.ts       # price_history → original_price / reduction columns
+  geocode.ts                    # Census geocoder for rows missing lat/lng
+  predeploy-db.ts               # Folds WAL into a single read-only file for Vercel
+  importers/zillow.ts           # Optional RapidAPI source (needs RAPIDAPI_KEY)
 
 data/
   apartments.db                 # SQLite database file (gitignored)
+  import-<id>.log               # Per-run import logs read by the Import page
 ```
 
 ## Routes
 
 | Path | Type | Description |
 |------|------|-------------|
-| `/` | Server | Redirects to `/listings` |
-| `/listings` | Server | Browse all active listings with filters, stats banner, sortable table |
-| `/listing/[id]` | Server | Detail view — price, stats, price history chart, external links |
-| `/deals` | Server | 6 deal presets (reduced 7d/30d, DOM 60+/90+, below median $/sqft, big reductions) |
-| `/compare` | Server | Side-by-side comparison of up to 4 listings (via `?ids=1,2,3`) |
-| `/market` | Client | Market trends dashboard — 8 metrics × selectable area × time range |
-| `/import` | Client | Import UI — run StreetEasy/demo imports, test API key, view import history |
-
-### API Routes
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/listings` | GET | Filtered listings with pagination, stats, neighborhood list |
-| `/api/listings/[id]` | GET | Single listing by ID |
-| `/api/deals` | GET | Without `?preset` returns counts; with preset returns matching listings |
-| `/api/market-trends` | GET | `?action=areas` for area list, `?action=count` for data check, `?area=X` for trend data |
-| `/api/price-history/[id]` | GET | Price history events for a listing |
-| `/api/import` | GET/POST | GET returns import logs; POST spawns detached `tsx` import script |
-| `/api/import/test` | GET | Tests StreetEasy API key connectivity |
+| `/listings` | Server | Browse with filters, stats banner, sortable table |
+| `/map` | Client | Markers for everything with coordinates, draw-a-box filter, town labels |
+| `/listing/[id]` | Server | Detail — price, lot, year built, taxes, price history, Redfin/Zillow links |
+| `/deals` | Server | 6 presets (reduced 7d/30d, DOM 60+/90+, below town median $/sqft, 5%+ cuts) |
+| `/compare` | Server | Up to 4 listings side by side (`?ids=1,2,3`) |
+| `/market` | Client | 8 metrics × area (town / region / all) × time range |
+| `/import` | Client | Pick towns, run the Redfin import, watch the log, test connectivity |
 
 All API routes use `export const dynamic = 'force-dynamic'`.
 
 ## Database Schema
 
-SQLite with WAL mode + foreign key constraints. 5 tables:
+SQLite, WAL mode, foreign keys on. DDL lives in `SCHEMA_SQL` (`src/lib/schema.ts`); every script calls `applySchema(db)` on its own connection so nothing depends on the app having started.
 
 ### `listings`
-Core table. Key fields: `external_id` (unique), `source` (streeteasy/zillow/demo), `address`, `unit`, `neighborhood`, `borough` (Manhattan/Brooklyn), `zip_code`, `lat/lng`, `bedrooms`, `bathrooms`, `sqft`, `price`, `price_per_sqft`, `hoa_fee`, `tax_annual`, `listing_status` (for_sale/pending/off_market), `listing_type` (Condo/Co-op/Townhouse), `days_on_market`, `listed_date`, `original_price`, `price_reduction_amount`, `price_reduction_pct`, `last_price_reduction_date`, `first_seen_at`, `imported_at`.
-
-Indexes on: borough, neighborhood, price, days_on_market, bedrooms, listing_status, price_reduction_pct.
+`external_id` (unique: `rf-<propertyId>`, `rf-rent-<rentalId>`, `demo-…`, `zillow-…`), `source` (redfin/zillow/demo), `address`, `unit`, `neighborhood` (town), `region`, `zip_code`, `lat/lng`, `bedrooms`, `bathrooms`, `sqft`, `lot_sqft`, `year_built`, `price`, `price_per_sqft` (sales, non-land), `hoa_fee`, `tax_annual`, `listing_status` (for_sale/pending/off_market), `listing_type` (House/Land/Multi-family/Condo/Townhouse/Manufactured/Apartment/Co-op/Other), `listing_category` (sale/rental), `days_on_market`, `listed_date`, `original_price`, `price_reduction_amount`, `price_reduction_pct`, `last_price_reduction_date`, `description`, `image_url`, `listing_url`, `available_at`, `off_market_at`, `price_delta_reported`, `first_seen_at`, `imported_at`.
 
 ### `price_history`
-Tracks price events per listing. Fields: `listing_id` (FK → listings), `price`, `event_type` (listed/reduced/increased/relisted), `event_date`. Unique on `(listing_id, event_date, event_type)`.
+`listing_id` (FK, cascade), `price`, `event_type` (listed/reduced/increased/relisted), `event_date`. Unique on `(listing_id, event_date, event_type)`, which also dedupes the double-reported MLS events Redfin returns.
 
 ### `neighborhood_benchmarks`
-Median price/ppsf per neighborhood+borough+bedrooms. Used for "below median $/sqft" deal detection. Seeded by demo script; not auto-computed from live data.
+Median `price_per_sqft` and price per `(neighborhood, region)` with `bedrooms IS NULL`, computed by `compute-benchmarks.ts` from current non-land sale listings (min sample 3). Drives "below median $/sqft".
 
 ### `market_trends`
-Time-series market data. Fields: `area_name`, `borough`, `area_type` (neighborhood/submarket/borough/city), `metric`, `period` (YYYY-MM), `value`. 8 metrics: medianAskingPrice, medianSalesPrice, daysOnMarket, totalInventory, priceCutShare, saleListRatio, recordedSalesVolume, priceIndex.
+`area_name`, `region`, `area_type` (town/region/all), `metric`, `period` (YYYY-MM), `value`. Metrics: medianAskingPrice, medianPricePerSqft, medianRent, totalInventory, rentalInventory, daysOnMarket, priceCutShare (0–1), medianLotAcres. Written by `snapshot-market.ts` at the end of every import; one row per metric per month, replaced on re-run.
 
 ### `import_logs`
-Audit trail for imports. Fields: `source`, `status` (running/success/error), `listings_added`, `listings_updated`, `error_message`, `started_at`, `completed_at`.
+`source`, `status` (running/success/error), `listings_added`, `listings_updated`, `error_message`, `started_at`, `completed_at`.
 
-Migrations run automatically via `instrumentation.ts` on Next.js startup. Add new migrations to `schema.ts` → `runMigrations()`.
+## Redfin importer (`scripts/scrape-redfin.ts`)
 
-## Key Services
-
-### `lib/queries/listings.ts`
-- `getListings(filters)` — main query with dynamic WHERE, JOIN to benchmarks, pagination
-- `getListingById(id)` / `getListingsByIds(ids)` — single/multi lookup with benchmark join
-- `getPriceHistory(listingId)` — ordered price events
-- `getDistinctNeighborhoods()` — for filter dropdowns
-- `getListingStats()` — aggregate counts (total, price reduced, stale, price range)
-- `getDealListings(preset)` / `getDealCounts()` — 6 preset deal queries
-
-### `lib/queries/market.ts`
-- `getMarketAreas(areaType?)` — distinct areas for selector
-- `getMarketTrend(areaName, metrics, fromPeriod?)` — time-series data
-- `getMarketTrendCount()` — check if market data is imported
-
-### `scripts/importers/streeteasy.ts`
-Dual-pass import: first fetches listings sorted by `listed_desc` (up to 100 pages × 2 boroughs), then a second pass sorted by `price_reduction` (10 pages × 2 boroughs) to catch recent cuts. Upserts listings, detects price changes between runs, computes DOM from `first_seen_at`.
-
-### `scripts/importers/zillow.ts`
-Two-phase import: Phase 1 searches by zip code (19 zips), Phase 2 fetches property details for new listings only (price history, HOA, tax, description).
-
-### `scripts/import-market-data.ts`
-Reads StreetEasy CSV files from a local folder (default: Google Drive Downloads2025). Handles standard format (area × period matrix) and wide format (priceIndex). Parses 8 metrics into `market_trends` table.
-
-## Authentication & Authorisation
-
-None. This is a personal tool with no auth layer. Do not add one.
-
-## External Integrations
-
-| Integration | Purpose | Config |
-|-------------|---------|--------|
-| **StreetEasy via RapidAPI** (ST Easy API) | Primary listing source — Manhattan & Brooklyn active for-sale | `RAPIDAPI_KEY` in `.env.local`. Free tier: 500 req/month. ~210 listings per run |
-| **Zillow via RapidAPI** (zillow-com1) | Alternative listing source (not currently used in import orchestrator) | Same `RAPIDAPI_KEY`. Free tier: 500 req/month |
-| **Claude Brain** (Postgres) | Shared intelligence layer for prompts/instructions | `CLAUDE_BRAIN_DATABASE_URL` in `.env.local` |
+- Search: `GET https://www.redfin.com/stingray/api/gis?…&region_id=<zip id>&region_type=2` for sales, `…/stingray/api/v1/search/rentals?…` for rentals. Responses may be prefixed with `{}&&`. A browser User-Agent is required.
+- Sale fields come wrapped as `{ value, level }`; `uiPropertyType` maps to our `ListingType` (1 House, 2 Condo, 3 Townhouse, 4 Multi-family, 5 Land, 7 Manufactured, 8 Co-op). `dom` is Redfin's own days-on-market; `listed_date` is derived from it. Photo URL pattern: `https://ssl.cdn-redfin.com/photo/<dataSourceId>/mbphotov3/<last 3 of mlsId>/genMid.<mlsId>_0.jpg` (some 404; the table hides broken images).
+- Details: for new sale listings, `…/stingray/api/home/details/belowTheFold?propertyId&listingId&accessLevel=1` gives `propertyHistoryInfo.events` (Listed / Price Changed, often reported twice by two MLS feeds) and `publicRecordsInfo.taxInfo.taxesDue`. Only the current listing cycle (from the latest "Listed" event) is recorded. Capped per run by `--details-limit` (default 80).
+- Price changes between runs are recorded as `reduced`/`increased` events dated today.
+- Off-market: active Redfin rows in a successfully scraped zip that did not appear this run get `listing_status = 'off_market'`. Nothing is deleted.
+- Then `rollupPriceHistory`, `computeBenchmarks`, `snapshotMarket`.
+- 1.5s between requests; 403/429/5xx back off 20s/40s/60s then give up on that town.
 
 ## Component Patterns
 
-- **URL-driven filters**: All filter state lives in query params via `useSearchParams()` + `router.push()`. No Zustand, no React context. Enables shareable URLs and back button support
-- **Server Components for data**: Listings, deals, compare, detail pages are async server components that call query functions directly. Only interactive UI (filters, table, charts, import) is `'use client'`
-- **Client-side data refresh**: `ListingsTable` re-fetches via `/api/listings` when searchParams change. Market page and import page use `useEffect` + `fetch`
-- **Recharts for charts**: `PriceHistoryChart` (step-after line with colored dots per event type) and `MarketPage` (8 mini line charts in a 4-col grid)
-- **Compare flow**: Checkboxes in `ListingsTable` → max 4 → blue compare bar → `/compare?ids=1,2,3,4`
-- **Badge component**: Simple `Badge` with color variants (green/yellow/red/blue/gray/orange) used for DOM indicators and status labels
-- **External links**: Every listing row/detail has StreetEasy and Zillow search links built from address
-
-## Environment Variables
-
-```
-RAPIDAPI_KEY                    # StreetEasy + Zillow API access (RapidAPI)
-CLAUDE_BRAIN_DATABASE_URL       # Postgres connection string for claude-brain
-```
-
-## Key Files
-
-| File | Description |
-|------|-------------|
-| `src/lib/db.ts` | Singleton SQLite connection with WAL mode |
-| `src/lib/schema.ts` | All table DDL + indexes + migrations |
-| `src/lib/types.ts` | Core types: Listing, ListingFilters, DealPreset, PriceHistoryEntry |
-| `src/lib/queries/listings.ts` | All listing queries including 6 deal presets |
-| `src/lib/queries/market.ts` | Market trend queries |
-| `src/lib/utils.ts` | formatPrice, domColor, bedsLabel, streetEasyUrl, buildListingUrl |
-| `src/instrumentation.ts` | Auto-runs migrations on Next.js startup |
-| `src/app/listings/page.tsx` | Main browse page (server component with filters + table) |
-| `src/app/deals/page.tsx` | Deal presets page with 6 query cards |
-| `src/app/compare/page.tsx` | Side-by-side comparison table |
-| `src/app/market/page.tsx` | Market trends dashboard (client, 8 metric charts) |
-| `src/app/listing/[id]/page.tsx` | Listing detail with price history |
-| `src/app/import/page.tsx` | Import UI with test/run/history |
-| `src/components/listings/ListingsTable.tsx` | Sortable table with compare checkboxes + pagination |
-| `src/components/listings/ListingsFilters.tsx` | URL-driven filter bar |
-| `src/components/charts/PriceHistoryChart.tsx` | Price history line chart |
-| `scripts/importers/streeteasy.ts` | StreetEasy dual-pass importer |
-| `scripts/importers/zillow.ts` | Zillow two-phase importer |
-| `scripts/import.ts` | Import orchestrator |
-| `scripts/seed-demo.ts` | Demo data generator (~200 listings + benchmarks) |
-| `scripts/import-market-data.ts` | StreetEasy CSV market data importer |
-| `next.config.mjs` | Enables instrumentation hook + externalizes better-sqlite3 |
+- **URL-driven filters**: all filter state lives in query params via `useSearchParams()` + `router.push()`. No store, no context.
+- **Server Components for data**: listings, deals, compare, detail pages call query functions directly. Only interactive UI is `'use client'`.
+- **Client-side refresh**: `ListingsTable` re-fetches `/api/listings` when searchParams change. Market and import pages use `useEffect` + `fetch`.
+- **Compare flow**: checkboxes in `ListingsTable` → max 4 → `/compare?ids=…`.
+- **External links**: every row/detail has a Redfin link (direct `listing_url` when the source is Redfin, else a search) and a Zillow search link.
 
 ## Development
 
 ```bash
-npm run dev              # Start dev server
-npm run seed             # Seed ~200 demo listings (no API key needed)
-npm run import           # Run StreetEasy import (needs RAPIDAPI_KEY)
-npm run import-market    # Import market CSVs from local folder
-npm run build            # Production build
+npm run dev          # start dev server (migrations run on startup)
+npm run seed         # demo data, no network
+npm run scrape       # live Redfin import for active towns
+npm run typecheck    # tsc --noEmit
+npm run lint
+npm run build
 ```
 
-- Database auto-creates on first run via `instrumentation.ts`
-- Demo data is sufficient to test all features except market trends (need `npm run import-market`)
-- StreetEasy import: ~210 listings per run, safe to run 2x/week on free tier
-- Import runs as detached subprocess — check import history on `/import` page
-- Days on market computed from `first_seen_at`, not from API data
-
-## Data Sources
-
-- **StreetEasy** via RapidAPI (ST Easy API) — free tier: 500 req/month. ~210 listings per run
-- **Zillow** via RapidAPI (zillow-com1) — available but not wired into default import orchestrator
-- **Market CSVs** — downloaded StreetEasy data files, imported via `npm run import-market`
-- **Demo seed** — `npm run seed` for local dev without API key
+- Lot sizes are stored in sqft and shown in acres (`lotLabel`).
+- Days on market for Redfin rows is Redfin's figure; for demo/zillow rows it is derived from `first_seen_at`.
+- The Import page spawns the scraper as a detached process and tails `data/import-<id>.log`.
 
 ## What I Don't Want
 
@@ -233,3 +165,4 @@ npm run build            # Production build
 - Don't move filter state into Zustand or React context — URL params are the source of truth
 - Don't add an auth layer — this is a personal tool
 - No component libraries (shadcn, MUI, etc.) — hand-rolled Tailwind components only
+- Don't hammer Redfin: keep the request gap, never parallelise town fetches
