@@ -3,19 +3,20 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
+import { REGION_LABELS, type Region } from '@/lib/areas';
 
-type Area = { area_name: string; borough: string; area_type: string };
+type Area = { area_name: string; region: string; area_type: string };
 type TrendRow = { period: string; metric: string; value: number };
 
 const METRICS = [
-  { key: 'medianAskingPrice',   label: 'Median Asking Price',  color: '#3b82f6', fmt: (v: number) => `$${(v / 1000).toFixed(0)}k` },
-  { key: 'medianSalesPrice',    label: 'Median Sales Price',   color: '#8b5cf6', fmt: (v: number) => `$${(v / 1000).toFixed(0)}k` },
-  { key: 'daysOnMarket',        label: 'Days on Market',       color: '#f59e0b', fmt: (v: number) => `${Math.round(v)}d` },
-  { key: 'totalInventory',      label: 'Total Inventory',      color: '#10b981', fmt: (v: number) => Math.round(v).toLocaleString() },
-  { key: 'priceCutShare',       label: 'Price Cut Share',      color: '#ef4444', fmt: (v: number) => `${(v * 100).toFixed(1)}%` },
-  { key: 'saleListRatio',       label: 'Sale / List Ratio',    color: '#06b6d4', fmt: (v: number) => `${(v * 100).toFixed(1)}%` },
-  { key: 'recordedSalesVolume', label: 'Sales Volume',         color: '#84cc16', fmt: (v: number) => Math.round(v).toLocaleString() },
-  { key: 'priceIndex',          label: 'Price Index',          color: '#f97316', fmt: (v: number) => v.toFixed(1) },
+  { key: 'medianAskingPrice',  label: 'Median Asking Price',   color: '#3b82f6', fmt: (v: number) => `$${(v / 1000).toFixed(0)}k` },
+  { key: 'medianPricePerSqft', label: 'Median $/sqft',         color: '#8b5cf6', fmt: (v: number) => `$${Math.round(v)}` },
+  { key: 'medianRent',         label: 'Median Rent',           color: '#06b6d4', fmt: (v: number) => `$${Math.round(v).toLocaleString()}/mo` },
+  { key: 'totalInventory',     label: 'Homes for Sale',        color: '#10b981', fmt: (v: number) => Math.round(v).toLocaleString() },
+  { key: 'rentalInventory',    label: 'Rentals Listed',        color: '#84cc16', fmt: (v: number) => Math.round(v).toLocaleString() },
+  { key: 'daysOnMarket',       label: 'Median Days on Market', color: '#f59e0b', fmt: (v: number) => `${Math.round(v)}d` },
+  { key: 'priceCutShare',      label: 'Price Cut Share',       color: '#ef4444', fmt: (v: number) => `${(v * 100).toFixed(1)}%` },
+  { key: 'medianLotAcres',     label: 'Median Lot (acres)',    color: '#f97316', fmt: (v: number) => `${v.toFixed(1)} ac` },
 ];
 
 const RANGES = [
@@ -26,7 +27,16 @@ const RANGES = [
   { label: 'All', months: 0 },
 ];
 
-const AREA_TYPES = ['neighborhood', 'submarket', 'borough'];
+const AREA_TYPES = [
+  { key: 'town', label: 'Town' },
+  { key: 'region', label: 'Region' },
+  { key: 'all', label: 'All' },
+];
+
+function areaLabel(a: Area): string {
+  if (a.area_type !== 'town') return a.area_name;
+  return `${a.area_name} (${REGION_LABELS[a.region as Region] ?? a.region})`;
+}
 
 function getPeriodFrom(months: number): string | undefined {
   if (!months) return undefined;
@@ -77,7 +87,7 @@ function MiniChart({
 }
 
 export default function MarketPage() {
-  const [areaType, setAreaType] = useState('neighborhood');
+  const [areaType, setAreaType] = useState('town');
   const [areas, setAreas] = useState<Area[]>([]);
   const [selectedArea, setSelectedArea] = useState<string>('');
   const [range, setRange] = useState(36);
@@ -98,9 +108,7 @@ export default function MarketPage() {
       .then(r => r.json())
       .then((data: Area[]) => {
         setAreas(data);
-        // Default to first Manhattan neighborhood
-        const first = data.find(a => a.borough === 'Manhattan') || data[0];
-        setSelectedArea(first?.area_name ?? '');
+        setSelectedArea(data[0]?.area_name ?? '');
       });
   }, [areaType]);
 
@@ -131,12 +139,12 @@ export default function MarketPage() {
     return (
       <div className="max-w-screen-2xl mx-auto px-4 py-12 text-center">
         <h1 className="text-2xl font-bold text-gray-900 mb-3">Market Trends</h1>
-        <p className="text-gray-500 mb-6">No market data imported yet.</p>
+        <p className="text-gray-500 mb-6">No market snapshots yet.</p>
         <div className="inline-block bg-gray-100 rounded-xl px-6 py-4 text-left text-sm font-mono text-gray-700">
-          npm run import-market
+          npm run scrape
         </div>
         <p className="text-gray-400 text-xs mt-3">
-          Imports StreetEasy market data (asking price, DOM, inventory, and more) from your Downloads2025 folder.
+          A snapshot is written at the end of every import, so trends build up over repeated imports.
         </p>
       </div>
     );
@@ -147,7 +155,7 @@ export default function MarketPage() {
       <div className="flex items-start justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Market Trends</h1>
-          <p className="text-gray-500 text-sm mt-0.5">StreetEasy historical data by neighborhood</p>
+          <p className="text-gray-500 text-sm mt-0.5">Monthly snapshots computed from imported listings</p>
         </div>
       </div>
 
@@ -157,15 +165,15 @@ export default function MarketPage() {
         <div className="flex rounded-lg border border-gray-200 overflow-hidden bg-white">
           {AREA_TYPES.map(t => (
             <button
-              key={t}
-              onClick={() => setAreaType(t)}
+              key={t.key}
+              onClick={() => setAreaType(t.key)}
               className={`px-3 py-1.5 text-sm font-medium transition-colors ${
-                areaType === t
+                areaType === t.key
                   ? 'bg-blue-600 text-white'
                   : 'text-gray-600 hover:bg-gray-50'
               }`}
             >
-              {t.charAt(0).toUpperCase() + t.slice(1)}
+              {t.label}
             </button>
           ))}
         </div>
@@ -178,7 +186,7 @@ export default function MarketPage() {
         >
           {areas.map(a => (
             <option key={a.area_name} value={a.area_name}>
-              {a.area_name} ({a.borough})
+              {areaLabel(a)}
             </option>
           ))}
         </select>
@@ -205,7 +213,7 @@ export default function MarketPage() {
       {selectedAreaObj && (
         <p className="text-sm text-gray-500 mb-4">
           Showing <span className="font-semibold text-gray-800">{selectedArea}</span>
-          {' '}· {selectedAreaObj.borough} · {selectedAreaObj.area_type}
+          {' '}· {selectedAreaObj.area_type}
           {loading && <span className="ml-2 text-blue-500">Loading…</span>}
         </p>
       )}

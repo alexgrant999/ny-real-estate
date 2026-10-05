@@ -3,7 +3,8 @@ import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { Listing } from '@/lib/types';
 import { Badge } from '@/components/ui/Badge';
-import { formatPrice, formatRentalPrice, domColor, domLabel, bedsLabel, streetEasyUrl, zillowSearchUrl, availableLabel } from '@/lib/utils';
+import { formatPrice, formatRentalPrice, domColor, domLabel, bedsLabel, lotLabel, redfinSearchUrl, zillowSearchUrl, availableLabel } from '@/lib/utils';
+import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
 
 interface SortThProps {
@@ -126,7 +127,7 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
             <tr>
               <th className="w-8 px-3 py-2"></th>
               <th className="text-left px-3 py-2 text-gray-600 font-medium">Address</th>
-              <th className="text-left px-3 py-2 text-gray-600 font-medium">Neighborhood</th>
+              <th className="text-left px-3 py-2 text-gray-600 font-medium">Town</th>
               <SortTh col="price" label="Price" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortTh col="price_reduction_pct" label="Reduction" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortTh col="price_per_sqft" label="$/sqft" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
@@ -134,7 +135,7 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
               <SortTh col="sqft" label="Sqft" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortTh col="dom" label="DOM" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="center" />
               <th className="text-left px-3 py-2 text-gray-600 font-medium">Type</th>
-              <th className="text-right px-3 py-2 text-gray-600 font-medium">HOA/mo</th>
+              <SortTh col="lot_sqft" label="Lot" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
               <th className="px-3 py-2"></th>
             </tr>
           </thead>
@@ -170,6 +171,7 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
                           src={l.image_url}
                           alt=""
                           loading="lazy"
+                          onError={e => { e.currentTarget.style.display = 'none'; }}
                           className="w-11 h-11 rounded object-cover bg-gray-100 shrink-0"
                         />
                       ) : (
@@ -185,7 +187,7 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
                           )}
                         </div>
                         <div className="text-xs text-gray-400">
-                          {l.borough}
+                          {REGION_LABELS[l.region] ?? l.region}
                           {availableLabel(l.available_at) && (
                             <span className="text-gray-500"> · Avail {availableLabel(l.available_at)}</span>
                           )}
@@ -238,22 +240,22 @@ export function ListingsTable({ initialListings, initialTotal }: Props) {
                     </Badge>
                   </td>
                   <td className="px-3 py-2 text-gray-600">{l.listing_type ?? '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-600">
-                    {l.hoa_fee ? `$${l.hoa_fee.toLocaleString()}` : '—'}
+                  <td className="px-3 py-2 text-right text-gray-700">
+                    {lotLabel(l.lot_sqft)}
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-1.5">
                       <a
-                        href={l.listing_url?.includes('streeteasy.com') ? l.listing_url : streetEasyUrl(l.address, l.unit)}
+                        href={l.listing_url?.includes('redfin.com') ? l.listing_url : redfinSearchUrl(l.address, l.neighborhood)}
                         target="_blank"
                         rel="noopener noreferrer"
-                        title={l.listing_url?.includes('streeteasy.com') ? 'View on StreetEasy' : 'Search on StreetEasy'}
-                        className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3D5A80] text-white hover:opacity-80 whitespace-nowrap"
+                        title={l.listing_url?.includes('redfin.com') ? 'View on Redfin' : 'Search on Redfin'}
+                        className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#a02021] text-white hover:opacity-80 whitespace-nowrap"
                       >
-                        SE
+                        RF
                       </a>
                       <a
-                        href={l.listing_url && l.source === 'zillow' ? l.listing_url : zillowSearchUrl(l.address)}
+                        href={l.listing_url && l.source === 'zillow' ? l.listing_url : zillowSearchUrl(l.address, l.neighborhood)}
                         target="_blank"
                         rel="noopener noreferrer"
                         title={l.listing_url && l.source === 'zillow' ? 'View on Zillow' : 'Search on Zillow'}

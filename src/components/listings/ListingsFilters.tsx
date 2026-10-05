@@ -1,12 +1,24 @@
 'use client';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback } from 'react';
+import { REGIONS, REGION_LABELS, type Region } from '@/lib/areas';
+import { LISTING_TYPES } from '@/lib/types';
 
 interface FiltersProps {
-  neighborhoods: { neighborhood: string; borough: string }[];
+  /** Towns present in the data (the `neighborhood` column), with their region. */
+  towns: { neighborhood: string; region: string }[];
 }
 
-export function ListingsFilters({ neighborhoods }: FiltersProps) {
+const ACRE_OPTIONS = [
+  { label: 'Any', value: '' },
+  { label: '0.5+ ac', value: '0.5' },
+  { label: '1+ ac', value: '1' },
+  { label: '2+ ac', value: '2' },
+  { label: '5+ ac', value: '5' },
+  { label: '10+ ac', value: '10' },
+];
+
+export function ListingsFilters({ towns }: FiltersProps) {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -22,19 +34,20 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
   }, [router, sp]);
 
   const category = sp.get('category') ?? 'all';
-  const borough = sp.get('borough') ?? 'all';
-  const neighborhood = sp.get('neighborhood') ?? '';
+  const region = sp.get('region') ?? 'all';
+  const town = sp.get('neighborhood') ?? '';
   const minPrice = sp.get('minPrice') ?? '';
   const maxPrice = sp.get('maxPrice') ?? '';
   const minBeds = sp.get('minBedrooms') ?? '';
   const minDom = sp.get('minDom') ?? '';
   const maxDom = sp.get('maxDom') ?? '';
+  const minAcres = sp.get('minAcres') ?? '';
   const priceReduced = sp.get('priceReduced') === 'true';
   const listingType = sp.get('listingType') ?? 'all';
   const sortBy = sp.get('sortBy') ?? 'price';
   const sortDir = sp.get('sortDir') ?? 'asc';
 
-  const boroughs = ['all', 'Manhattan', 'Brooklyn'];
+  const regionOptions: ('all' | Region)[] = ['all', ...REGIONS];
   const bedOptions = [
     { label: 'Any', value: '' },
     { label: 'Studio', value: '0' },
@@ -42,6 +55,14 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
     { label: '2+', value: '2' },
     { label: '3+', value: '3' },
   ];
+
+  // Towns grouped by region for the <optgroup>s; towns with an unknown region go in a trailing group.
+  const townsByRegion = REGIONS.map(r => ({
+    region: r,
+    label: REGION_LABELS[r],
+    towns: towns.filter(t => t.region === r),
+  }));
+  const otherTowns = towns.filter(t => !REGIONS.includes(t.region as Region));
 
   return (
     <div className="bg-white border-b border-gray-200 px-4 py-3">
@@ -64,36 +85,49 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
           ))}
         </div>
 
-        {/* Borough */}
+        {/* Region */}
         <div className="flex rounded-lg border border-gray-200 overflow-hidden text-sm">
-          {boroughs.map(b => (
+          {regionOptions.map(r => (
             <button
-              key={b}
-              onClick={() => update('borough', b === 'all' ? undefined : b)}
-              className={`px-3 py-1.5 ${
-                borough === b
+              key={r}
+              onClick={() => update('region', r === 'all' ? undefined : r)}
+              className={`px-3 py-1.5 whitespace-nowrap ${
+                region === r
                   ? 'bg-blue-600 text-white'
                   : 'bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
-              {b === 'all' ? 'Both' : b}
+              {r === 'all' ? 'All' : REGION_LABELS[r]}
             </button>
           ))}
         </div>
 
-        {/* Neighborhood */}
-        {neighborhoods.length > 0 && (
+        {/* Town */}
+        {towns.length > 0 && (
           <select
-            value={neighborhood}
+            value={town}
             onChange={e => update('neighborhood', e.target.value || undefined)}
             className="px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
           >
-            <option value="">All neighborhoods</option>
-            {neighborhoods.map(n => (
-              <option key={`${n.borough}-${n.neighborhood}`} value={n.neighborhood}>
-                {n.neighborhood}
-              </option>
+            <option value="">All towns</option>
+            {townsByRegion.map(group => group.towns.length > 0 && (
+              <optgroup key={group.region} label={group.label}>
+                {group.towns.map(t => (
+                  <option key={`${t.region}-${t.neighborhood}`} value={t.neighborhood}>
+                    {t.neighborhood}
+                  </option>
+                ))}
+              </optgroup>
             ))}
+            {otherTowns.length > 0 && (
+              <optgroup label="Other">
+                {otherTowns.map(t => (
+                  <option key={`${t.region}-${t.neighborhood}`} value={t.neighborhood}>
+                    {t.neighborhood}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         )}
 
@@ -157,6 +191,20 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
           </select>
         </div>
 
+        {/* Min acres */}
+        <div className="flex items-center gap-1.5 text-sm">
+          <span className="text-gray-500 text-xs">Min acres</span>
+          <select
+            value={minAcres}
+            onChange={e => update('minAcres', e.target.value || undefined)}
+            className="px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
+          >
+            {ACRE_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+
         {/* Listing type */}
         <select
           value={listingType}
@@ -164,12 +212,9 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
           className="px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
         >
           <option value="all">All types</option>
-          <option value="Condo">Condo</option>
-          <option value="Co-op">Co-op</option>
-          <option value="Townhouse">Townhouse</option>
-          <option value="Apartment">Apartment</option>
-          <option value="House">House</option>
-          <option value="Condop">Condop</option>
+          {LISTING_TYPES.map(t => (
+            <option key={t} value={t}>{t}</option>
+          ))}
         </select>
 
         {/* Price reduced toggle */}
@@ -201,6 +246,7 @@ export function ListingsFilters({ neighborhoods }: FiltersProps) {
             <option value="price_reduction_amount">$ Reduction</option>
             <option value="price_per_sqft">$/sqft</option>
             <option value="sqft">Sq ft</option>
+            <option value="lot_sqft">Lot size</option>
           </select>
           <button
             onClick={() => update('sortDir', sortDir === 'asc' ? 'desc' : 'asc')}

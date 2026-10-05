@@ -2,7 +2,8 @@ import { getListingById, getPriceHistory } from '@/lib/queries/listings';
 import { notFound } from 'next/navigation';
 import { Badge } from '@/components/ui/Badge';
 import { PriceHistoryChart } from '@/components/charts/PriceHistoryChart';
-import { formatPriceFull, formatPrice, formatRentalPrice, domColor, domLabel, bedsLabel, streetEasyUrl, zillowSearchUrl, availableLabel } from '@/lib/utils';
+import { formatPriceFull, formatPrice, formatRentalPrice, domColor, domLabel, bedsLabel, lotLabel, redfinSearchUrl, zillowSearchUrl, availableLabel } from '@/lib/utils';
+import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
 
 export default async function ListingDetailPage({ params }: { params: { id: string } }) {
@@ -26,7 +27,7 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
               <h1 className="text-2xl font-bold text-gray-900">
                 {listing.address}{listing.unit ? ` #${listing.unit}` : ''}
               </h1>
-              <p className="text-gray-500 mt-0.5">{listing.neighborhood}, {listing.borough}</p>
+              <p className="text-gray-500 mt-0.5">{listing.neighborhood}, {REGION_LABELS[listing.region] ?? listing.region} · {listing.zip_code}</p>
             </div>
             <div className="text-right shrink-0">
               <div className="text-3xl font-bold text-gray-900">
@@ -68,14 +69,16 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
             { label: 'Bedrooms', value: bedsLabel(listing.bedrooms) },
             { label: 'Bathrooms', value: listing.bathrooms ? `${listing.bathrooms}` : '—' },
             { label: 'Sqft', value: listing.sqft ? listing.sqft.toLocaleString() : '—' },
-            // Carrying charges and $/sqft are sale concepts. Rentals get move-in date instead,
-            // which is the field a renter actually filters on.
+            // Lot, year built, $/sqft, taxes and HOA are sale concepts. Rentals get move-in date
+            // instead, which is the field a renter actually filters on.
             ...(listing.listing_category === 'rental'
               ? [{ label: 'Available', value: availableLabel(listing.available_at) ?? '—' }]
               : [
+                  { label: 'Lot', value: lotLabel(listing.lot_sqft) },
+                  { label: 'Year built', value: listing.year_built ? `${listing.year_built}` : '—' },
                   { label: '$/sqft', value: listing.price_per_sqft ? `$${listing.price_per_sqft.toLocaleString()}` : '—' },
-                  { label: 'HOA/mo', value: listing.hoa_fee ? `$${listing.hoa_fee.toLocaleString()}` : '—' },
-                  { label: 'Annual Tax', value: listing.tax_annual ? `$${listing.tax_annual.toLocaleString()}` : '—' },
+                  { label: 'Annual tax', value: listing.tax_annual ? `$${listing.tax_annual.toLocaleString()}` : '—' },
+                  ...(listing.hoa_fee ? [{ label: 'HOA/mo', value: `$${listing.hoa_fee.toLocaleString()}` }] : []),
                 ]),
             { label: 'Listed', value: listing.listed_date ?? '—' },
             { label: 'Source', value: listing.source.toUpperCase() },
@@ -90,7 +93,7 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
         {listing.neighborhood_median_ppsf && listing.price_per_sqft && (
           <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
             <div className="text-sm text-gray-600">
-              Neighborhood median: <strong>${Math.round(listing.neighborhood_median_ppsf).toLocaleString()}/sqft</strong>
+              Town median: <strong>${Math.round(listing.neighborhood_median_ppsf).toLocaleString()}/sqft</strong>
               {listing.price_per_sqft < listing.neighborhood_median_ppsf ? (
                 <span className="ml-2 text-green-600 font-medium">
                   This listing is {Math.round((listing.neighborhood_median_ppsf - listing.price_per_sqft) / listing.neighborhood_median_ppsf * 100)}% below median
@@ -133,23 +136,23 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
         )}
 
         <div className="px-6 pb-6 flex flex-wrap gap-3">
-          {listing.listing_url && listing.listing_url.includes('streeteasy.com') ? (
+          {listing.listing_url && listing.listing_url.includes('redfin.com') ? (
             <a
               href={listing.listing_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-[#3D5A80] text-white rounded-lg text-sm font-medium hover:opacity-90"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#a02021] text-white rounded-lg text-sm font-medium hover:opacity-90"
             >
-              View on StreetEasy ↗
+              View on Redfin ↗
             </a>
           ) : (
             <a
-              href={streetEasyUrl(listing.address, listing.unit)}
+              href={redfinSearchUrl(listing.address, listing.neighborhood)}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-[#3D5A80] text-white rounded-lg text-sm font-medium hover:opacity-90"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#a02021] text-white rounded-lg text-sm font-medium hover:opacity-90"
             >
-              Search on StreetEasy ↗
+              Search on Redfin ↗
             </a>
           )}
           {listing.listing_url && listing.source === 'zillow' ? (
@@ -163,7 +166,7 @@ export default async function ListingDetailPage({ params }: { params: { id: stri
             </a>
           ) : (
             <a
-              href={zillowSearchUrl(listing.address)}
+              href={zillowSearchUrl(listing.address, listing.neighborhood)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 bg-[#006AFF] text-white rounded-lg text-sm font-medium hover:opacity-90"

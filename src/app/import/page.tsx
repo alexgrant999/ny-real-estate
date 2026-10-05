@@ -1,14 +1,20 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 import type { ImportLog } from '@/lib/types';
-import { NEIGHBORHOODS, slugToLabel } from '@/lib/neighborhoods';
+import { REGIONS, REGION_LABELS, TOWNS, TOWNS_BY_REGION } from '@/lib/areas';
 
-const BOROUGH_LABELS: Record<string, string> = { manhattan: 'Manhattan', brooklyn: 'Brooklyn' };
+type TestResult = { ok: boolean; message: string };
 
 export default function ImportPage() {
   const [logs, setLogs] = useState<ImportLog[]>([]);
   const [loading, setLoading] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(TOWNS.filter(t => t.active).map(t => t.slug)),
+  );
+
+  // Connection test
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
 
   // Live log
   const [activeLogId, setActiveLogId] = useState<number | null>(null);
@@ -46,7 +52,7 @@ export default function ImportPage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeLogId, logDone]);
 
-  const toggleHood = (slug: string) => {
+  const toggleTown = (slug: string) => {
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(slug)) next.delete(slug); else next.add(slug);
@@ -54,17 +60,31 @@ export default function ImportPage() {
     });
   };
 
-  const toggleBorough = (borough: string) => {
-    const hoods = NEIGHBORHOODS[borough];
-    const allOn = hoods.every(h => selected.has(h));
+  const toggleRegion = (region: keyof typeof TOWNS_BY_REGION) => {
+    const slugs = TOWNS_BY_REGION[region].map(t => t.slug);
+    const allOn = slugs.every(s => selected.has(s));
     setSelected(prev => {
       const next = new Set(prev);
-      for (const h of hoods) { if (allOn) next.delete(h); else next.add(h); }
+      for (const s of slugs) { if (allOn) next.delete(s); else next.add(s); }
       return next;
     });
   };
 
-  const runImport = async (source: string) => {
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/import/test');
+      const data = (await res.json()) as TestResult;
+      setTestResult(data);
+    } catch (e) {
+      setTestResult({ ok: false, message: (e as Error).message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const runImport = async (source: 'redfin' | 'demo') => {
     setLoading(source);
     setLogLines([]);
     setLogDone(false);
@@ -73,10 +93,11 @@ export default function ImportPage() {
       const res = await fetch('/api/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sources: [source],
-          neighborhoods: source === 'streeteasy' ? Array.from(selected) : undefined,
-        }),
+        body: JSON.stringify(
+          source === 'redfin'
+            ? { sources: ['redfin'], towns: Array.from(selected) }
+            : { sources: ['demo'] },
+        ),
       });
       const data = await res.json();
       if (data.logId) {
@@ -93,68 +114,81 @@ export default function ImportPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
       <h1 className="text-2xl font-bold text-gray-900 mb-1">Import Data</h1>
-      <p className="text-gray-500 text-sm mb-6">Pull live NYC listings into the local database.</p>
+      <p className="text-gray-500 text-sm mb-6">Pull live Catskills listings into the local database.</p>
 
-      {/* StreetEasy */}
+      {/* Redfin */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
         <div className="flex items-start justify-between gap-4 mb-4">
           <div className="flex-1 min-w-0">
             <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-              StreetEasy Scraper
+              Redfin Import
               <span className="text-xs font-normal px-2 py-0.5 bg-green-100 text-green-700 rounded-full">live data</span>
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              Scrapes for-sale (≤$1.3M) and rentals (≤$4k/mo) for selected neighborhoods.
+              Pulls active for-sale and rental listings from Redfin for the selected towns. No API key needed.
             </p>
             <ul className="mt-1 text-xs text-gray-400 space-y-0.5">
-              <li>No API key · 5s delay between requests · price changes recorded as history</li>
+              <li>~1.5s between requests · price changes recorded as history · taxes and MLS price history fetched for new listings</li>
             </ul>
+            {testResult && (
+              <p className={`mt-2 text-xs ${testResult.ok ? 'text-green-600' : 'text-red-600'}`}>
+                {testResult.message}
+              </p>
+            )}
           </div>
           <div className="flex flex-col gap-2 shrink-0">
             <button
-              onClick={() => runImport('streeteasy')}
+              onClick={() => runImport('redfin')}
               disabled={loading !== null || selected.size === 0}
-              className="px-4 py-2 bg-[#3D5A80] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              className="px-4 py-2 bg-[#a02021] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50"
             >
-              {loading === 'streeteasy' ? 'Running...' : `Run Import (${selected.size})`}
+              {loading === 'redfin' ? 'Running...' : `Run Import (${selected.size})`}
+            </button>
+            <button
+              onClick={testConnection}
+              disabled={testing || loading !== null}
+              className="px-4 py-2 bg-white text-gray-700 border border-gray-200 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+            >
+              {testing ? 'Testing...' : 'Test connection'}
             </button>
           </div>
         </div>
 
-        {/* Neighbourhood toggles */}
+        {/* Town toggles */}
         <div className="border-t border-gray-100 pt-4 space-y-4">
-          {Object.entries(NEIGHBORHOODS).map(([borough, hoods]) => {
-            const allOn = hoods.every(h => selected.has(h));
-            const someOn = hoods.some(h => selected.has(h));
+          {REGIONS.map(region => {
+            const towns = TOWNS_BY_REGION[region];
+            const allOn = towns.every(t => selected.has(t.slug));
+            const someOn = towns.some(t => selected.has(t.slug));
             return (
-              <div key={borough}>
+              <div key={region}>
                 <div className="flex items-center gap-2 mb-2">
                   <button
-                    onClick={() => toggleBorough(borough)}
+                    onClick={() => toggleRegion(region)}
                     className={`text-xs font-semibold px-2 py-0.5 rounded border transition-colors ${
                       allOn ? 'bg-gray-900 text-white border-gray-900'
                       : someOn ? 'bg-gray-100 text-gray-700 border-gray-300'
                       : 'bg-white text-gray-400 border-gray-200'
                     }`}
                   >
-                    {BOROUGH_LABELS[borough]}
+                    {REGION_LABELS[region]}
                   </button>
                   <span className="text-xs text-gray-400">
-                    {hoods.filter(h => selected.has(h)).length}/{hoods.length}
+                    {towns.filter(t => selected.has(t.slug)).length}/{towns.length}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {hoods.map(slug => (
+                  {towns.map(town => (
                     <button
-                      key={slug}
-                      onClick={() => toggleHood(slug)}
+                      key={town.slug}
+                      onClick={() => toggleTown(town.slug)}
                       className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                        selected.has(slug)
+                        selected.has(town.slug)
                           ? 'bg-blue-600 text-white border-blue-600'
                           : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400 hover:text-gray-700'
                       }`}
                     >
-                      {slugToLabel(slug)}
+                      {town.name}
                     </button>
                   ))}
                 </div>
@@ -165,7 +199,7 @@ export default function ImportPage() {
       </div>
 
       {/* Live log */}
-      {(logLines.length > 0 || (loading === 'streeteasy' && activeLogId)) && (
+      {(logLines.length > 0 || (loading === 'redfin' && activeLogId)) && (
         <div className="mb-4 bg-gray-950 rounded-xl border border-gray-800 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800">
             <span className="text-xs font-mono text-gray-400">
@@ -207,7 +241,7 @@ export default function ImportPage() {
           <div>
             <h2 className="font-semibold text-gray-900">Demo Data</h2>
             <p className="text-sm text-gray-500 mt-1">
-              Generate ~200 realistic fake listings for testing filters and charts.
+              Generate ~300 fake Catskills listings for testing filters and charts.
             </p>
           </div>
           <button

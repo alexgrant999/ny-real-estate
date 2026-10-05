@@ -3,40 +3,16 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import type { Listing, ListingCategory } from '@/lib/types';
-import { formatPrice, formatRentalPrice } from '@/lib/utils';
+import { formatPrice, formatRentalPrice, lotLabel } from '@/lib/utils';
+import { TOWNS, REGION_LABELS } from '@/lib/areas';
+import { MAP_CENTER, MAP_ZOOM } from '@/lib/config';
 
 type Bounds = { swLat: number; swLng: number; neLat: number; neLng: number };
-
-type SubwayStation = {
-  name: string;
-  line: string;
-  lat: number;
-  lng: number;
-};
-
-const LINE_COLORS: Record<string, string> = {
-  A: '#0039A6', C: '#0039A6', E: '#0039A6',
-  B: '#FF6319', D: '#FF6319', F: '#FF6319', M: '#FF6319',
-  G: '#6CBE45',
-  J: '#996633', Z: '#996633',
-  L: '#A7A9AC',
-  N: '#FCCC0A', Q: '#FCCC0A', R: '#FCCC0A', W: '#FCCC0A',
-  '1': '#EE352E', '2': '#EE352E', '3': '#EE352E',
-  '4': '#00933C', '5': '#00933C', '6': '#00933C',
-  '7': '#B933AD',
-  S: '#808183',
-};
-
-function stationColor(line: string): string {
-  const first = line.trim().charAt(0).toUpperCase();
-  return LINE_COLORS[first] ?? '#555';
-}
 
 export default function MapView() {
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
-  const subwayLayerRef = useRef<L.LayerGroup | null>(null);
-  const hoodLayerRef = useRef<L.GeoJSON | null>(null);
+  const townLayerRef = useRef<L.LayerGroup | null>(null);
   const rectRef = useRef<L.Rectangle | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -46,95 +22,49 @@ export default function MapView() {
   const [drawing, setDrawing] = useState(false);
   const [bounds, setBounds] = useState<Bounds | null>(null);
   const [category, setCategory] = useState<ListingCategory | 'all'>('all');
-  const [showSubway, setShowSubway] = useState(false);
-  const [subwayStations, setSubwayStations] = useState<SubwayStation[]>([]);
+  const [showTowns, setShowTowns] = useState(true);
 
   // Init map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const map = L.map(containerRef.current).setView([40.73, -73.97], 12);
+    const map = L.map(containerRef.current).setView(MAP_CENTER, MAP_ZOOM);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
 
+    // Town labels sit on their own layer, added first so listing markers draw on top.
+    townLayerRef.current = L.layerGroup().addTo(map);
     markersRef.current = L.layerGroup().addTo(map);
-    subwayLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-
-    // Load NYC neighbourhood polygons (NTA boundaries) behind markers
-    const where = encodeURIComponent("boroname='Manhattan' OR boroname='Brooklyn' OR boroname='Queens'");
-    fetch(`https://data.cityofnewyork.us/resource/9nt8-h7nd.geojson?$limit=500&$where=${where}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(geo => {
-        if (!geo || !mapRef.current) return;
-        const layer = L.geoJSON(geo, {
-          style: {
-            color: '#94a3b8',
-            weight: 0.8,
-            fillColor: '#3b82f6',
-            fillOpacity: 0.07,
-            opacity: 0.4,
-          },
-          onEachFeature(feature, featureLayer) {
-            const name = feature.properties?.ntaname as string | undefined;
-            if (name) featureLayer.bindTooltip(name, { opacity: 0.85, direction: 'center', permanent: false });
-          },
-        });
-        layer.addTo(map);
-        layer.bringToBack();
-        hoodLayerRef.current = layer;
-      })
-      .catch(() => {/* silently fail */});
 
     return () => {
       map.remove();
       mapRef.current = null;
-      hoodLayerRef.current = null;
+      townLayerRef.current = null;
+      markersRef.current = null;
     };
   }, []);
 
-  // Fetch subway stations once on first toggle
+  // Render / clear town markers
   useEffect(() => {
-    if (!showSubway || subwayStations.length > 0) return;
-    fetch('https://data.cityofnewyork.us/resource/arq3-7z49.json?$limit=600')
-      .then(r => r.json())
-      .then((data: { name: string; line: string; the_geom: { coordinates: [number, number] } }[]) => {
-        setSubwayStations(data.map(s => ({
-          name: s.name,
-          line: s.line,
-          lat: s.the_geom.coordinates[1],
-          lng: s.the_geom.coordinates[0],
-        })));
-      })
-      .catch(() => {/* silently fail */});
-  }, [showSubway, subwayStations.length]);
-
-  // Render / clear subway markers
-  useEffect(() => {
-    const layer = subwayLayerRef.current;
+    const layer = townLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
-    if (!showSubway) return;
+    if (!showTowns) return;
 
-    for (const s of subwayStations) {
-      const color = stationColor(s.line);
-      const lines = s.line.split(' ').filter(Boolean);
-      const badges = lines.map(l =>
-        `<span style="display:inline-block;background:${LINE_COLORS[l.toUpperCase()] ?? '#555'};color:${l === 'N' || l === 'Q' || l === 'R' || l === 'W' ? '#000' : '#fff'};width:16px;height:16px;border-radius:50%;font-size:9px;font-weight:700;text-align:center;line-height:16px;margin-right:2px">${l}</span>`
-      ).join('');
-
-      L.circleMarker([s.lat, s.lng], {
-        radius: 5,
+    for (const t of TOWNS) {
+      L.circleMarker([t.lat, t.lng], {
+        radius: 4,
         color: '#fff',
-        weight: 1.5,
-        fillColor: color,
-        fillOpacity: 1,
+        weight: 1,
+        fillColor: '#6b7280',
+        fillOpacity: 0.9,
       })
-        .bindTooltip(`<strong>${s.name}</strong><br/>${badges}`, { direction: 'top', opacity: 0.95 })
+        .bindTooltip(t.name, { permanent: true, direction: 'top', className: 'town-label', opacity: 0.8 })
         .addTo(layer);
     }
-  }, [showSubway, subwayStations]);
+  }, [showTowns]);
 
   // Draw-a-box interaction
   useEffect(() => {
@@ -238,6 +168,8 @@ export default function MapView() {
       const beds = l.bedrooms === 0 ? 'Studio' : `${l.bedrooms ?? '?'} bed`;
       const baths = l.bathrooms ? ` · ${l.bathrooms} bath` : '';
       const sqft = l.sqft ? ` · ${l.sqft.toLocaleString()} ft²` : '';
+      const lot = l.lot_sqft ? ` · ${lotLabel(l.lot_sqft)}` : '';
+      const regionLabel = REGION_LABELS[l.region] ?? l.region;
       const tag = l.listing_category === 'rental'
         ? '<span style="background:#f3e8ff;color:#7c3aed;font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600">RENTAL</span>'
         : '';
@@ -250,9 +182,9 @@ export default function MapView() {
           <a href="/listing/${l.id}" style="font-weight:600;color:#2563eb;text-decoration:none;font-size:13px">
             ${l.address}${l.unit ? ` #${l.unit}` : ''}
           </a>
-          <div style="color:#6b7280;font-size:11px">${l.neighborhood}, ${l.borough}</div>
+          <div style="color:#6b7280;font-size:11px">${l.neighborhood}, ${regionLabel}</div>
           <div style="font-weight:700;font-size:18px;margin-top:4px">${price}</div>
-          <div style="color:#4b5563;font-size:11px;margin-top:2px">${beds}${baths}${sqft}</div>
+          <div style="color:#4b5563;font-size:11px;margin-top:2px">${beds}${baths}${sqft}${lot}</div>
           <div style="margin-top:4px">${tag}${typeTag}</div>
         </div>
       `;
@@ -310,12 +242,12 @@ export default function MapView() {
         )}
 
         <button
-          onClick={() => setShowSubway(v => !v)}
+          onClick={() => setShowTowns(v => !v)}
           className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors ${
-            showSubway ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+            showTowns ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
           }`}
         >
-          Subway
+          Towns
         </button>
 
         <span className="text-gray-500 ml-auto">
