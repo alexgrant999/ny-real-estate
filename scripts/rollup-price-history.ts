@@ -15,7 +15,11 @@
  *
  * Run standalone to backfill: npx tsx scripts/rollup-price-history.ts
  */
+import Database from 'better-sqlite3';
 import type BetterSqlite3 from 'better-sqlite3';
+import path from 'path';
+import fs from 'fs';
+import { applySchema } from '../src/lib/schema';
 
 export function rollupPriceHistory(db: BetterSqlite3.Database): { fromHistory: number; fromReported: number } {
   // The first price we ever saw for a listing is its original asking price.
@@ -60,12 +64,11 @@ export function rollupPriceHistory(db: BetterSqlite3.Database): { fromHistory: n
 }
 
 if (require.main === module) {
-  const Database = require('better-sqlite3') as typeof BetterSqlite3;
-  const path = require('path') as typeof import('path');
   // Standalone backfills can run against a database that predates these columns.
-  const { runMigrations } = require('../src/lib/schema') as typeof import('../src/lib/schema');
-  runMigrations();
+  fs.mkdirSync(path.join(process.cwd(), 'data'), { recursive: true });
   const db = new Database(path.join(process.cwd(), 'data', 'apartments.db'));
+  db.pragma('journal_mode = WAL');
+  applySchema(db);
   const { fromHistory, fromReported } = rollupPriceHistory(db);
   const { reduced } = db.prepare(
     'SELECT COUNT(*) as reduced FROM listings WHERE price_reduction_amount > 0'

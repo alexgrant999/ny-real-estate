@@ -12,7 +12,7 @@
  *   npx tsx scripts/scrape-redfin.ts --all-towns              # every town, including inactive ones
  *   npx tsx scripts/scrape-redfin.ts --sale-only | --rental-only
  *   npx tsx scripts/scrape-redfin.ts --no-details             # skip per-listing price history / tax fetch
- *   npx tsx scripts/scrape-redfin.ts --details-limit 40       # cap detail fetches per run (default 80)
+ *   npx tsx scripts/scrape-redfin.ts --details-limit 40       # cap detail fetches per run (default 120)
  *   npx tsx scripts/scrape-redfin.ts --debug                  # dump raw payloads to data/
  *
  * Per run:
@@ -22,6 +22,9 @@
  *   4. mark listings that disappeared from a scraped town as off_market
  *   5. roll price history up into the reduction columns, recompute town benchmarks,
  *      and take this month's market snapshot
+ *
+ * Behind an HTTP proxy (HTTPS_PROXY set), run with NODE_USE_ENV_PROXY=1 so Node's fetch
+ * honours it; by default Node connects directly and ignores the proxy variables.
  */
 import Database from 'better-sqlite3';
 import path from 'path';
@@ -43,7 +46,7 @@ const saleOnly = flag('--sale-only');
 const rentalOnly = flag('--rental-only');
 const noDetails = flag('--no-details');
 const debugMode = flag('--debug');
-const detailsLimit = parseInt(opt('--details-limit') ?? '80');
+const detailsLimit = parseInt(opt('--details-limit') ?? '120');
 const externalLogId = opt('--log-id') ? parseInt(opt('--log-id')!) : null;
 const townsFilter = opt('--towns')?.split(',').map(s => s.trim()).filter(Boolean) ?? null;
 const regionFilter = opt('--region')?.toLowerCase() ?? null;
@@ -119,7 +122,16 @@ const insertHistory = db.prepare(`
   VALUES (@listing_id, @price, @event_type, @event_date)
 `);
 const countHistory = db.prepare('SELECT COUNT(*) as n FROM price_history WHERE listing_id = ?');
-const setTax = db.prepare('UPDATE listings SET tax_annual = @tax WHERE id = @id');
+const markDetails = db.prepare('UPDATE listings SET tax_annual = COALESCE(@tax, tax_annual), details_fetched_at = @at WHERE id = @id');
+const dropListedEvents = db.prepare("DELETE FROM price_history WHERE listing_id = ? AND event_type = 'listed'");
+// Active Redfin sale listings whose detail payload has never been fetched: new ones first,
+// then anything a previous run skipped because of --details-limit.
+const detailCandidates = db.prepare(`
+  SELECT id, external_id, price, listed_date FROM listings
+  WHERE source = 'redfin' AND listing_category = 'sale' AND listing_status = 'for_sale'
+    AND details_fetched_at IS NULL
+  ORDER BY first_seen_at DESC, id DESC
+`);
 
 // ─── HTTP ─────────────────────────────────────────────────────────
 const BASE = 'https://www.redfin.com';
@@ -136,6 +148,7 @@ async function redfinJson(url: string): Promise<unknown> {
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': `${BASE}/`,
       },
+      signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 429 || res.status === 403 || res.status >= 500) {
       lastError = `HTTP ${res.status}`;
@@ -476,34 +489,39 @@ async function main() {
     }
   }
 
-  // ── Details for new sale listings ──────────────────────────────
-  if (newSales.length > 0) {
-    const batch = noDetails ? [] : newSales.slice(0, detailsLimit);
-    if (batch.length) console.log(`\n── Price history + taxes for ${batch.length} of ${newSales.length} new listings ──`);
-    const fetched = new Set<number>();
-    for (const n of batch) {
-      process.stdout.write(`  ${n.propertyId}... `);
+  // ── Details: MLS price history + taxes ─────────────────────────
+  // Every new sale listing gets a "listed" event right away so the chart has a start;
+  // the detail fetch then replaces it with the MLS history when it gets to that listing.
+  for (const n of newSales) {
+    insertHistory.run({ listing_id: n.id, price: n.price, event_type: 'listed', event_date: n.listedDate ?? today });
+  }
+  const listingIds = new Map(newSales.map(n => [n.id, n.listingId]));
+  const candidates = noDetails ? [] : (detailCandidates.all() as { id: number; external_id: string; price: number; listed_date: string | null }[]);
+  const batch = candidates.slice(0, detailsLimit);
+  if (batch.length) {
+    console.log(`\n── Price history + taxes for ${batch.length} of ${candidates.length} listings without details ──`);
+    for (const c of batch) {
+      const propertyId = c.external_id.replace(/^rf-/, '');
+      process.stdout.write(`  ${propertyId}... `);
       try {
-        const { events, tax } = await fetchDetails(n.propertyId, n.listingId);
+        const { events, tax } = await fetchDetails(propertyId, listingIds.get(c.id) ?? null);
         const cycle = currentCycle(events);
-        for (const ev of cycle) insertHistory.run({ listing_id: n.id, price: ev.price, event_type: ev.type, event_date: ev.date });
-        if (tax) setTax.run({ tax, id: n.id });
+        db.transaction(() => {
+          if (cycle.some(ev => ev.type === 'listed')) dropListedEvents.run(c.id);
+          for (const ev of cycle) insertHistory.run({ listing_id: c.id, price: ev.price, event_type: ev.type, event_date: ev.date });
+          const { n: have } = countHistory.get(c.id) as { n: number };
+          if (have === 0) insertHistory.run({ listing_id: c.id, price: c.price, event_type: 'listed', event_date: c.listed_date ?? today });
+          markDetails.run({ tax, at: now, id: c.id });
+        })();
         console.log(`${cycle.length} events${tax ? `, tax $${tax.toLocaleString()}` : ''}`);
-        fetched.add(n.id);
       } catch (e) {
         console.log(`FAILED: ${(e as Error).message}`);
       }
       await sleep(REQUEST_GAP_MS);
     }
-    // Anything without MLS history still gets a "listed" event so the chart has a start.
-    for (const n of newSales) {
-      const { n: have } = countHistory.get(n.id) as { n: number };
-      if (have === 0) insertHistory.run({ listing_id: n.id, price: n.price, event_type: 'listed', event_date: n.listedDate ?? today });
+    if (candidates.length > batch.length) {
+      console.log(`  ${candidates.length - batch.length} listings still without details; the next run continues from there (raise --details-limit to do more per run).`);
     }
-    if (!noDetails && newSales.length > detailsLimit) {
-      console.log(`  ${newSales.length - detailsLimit} new listings skipped (--details-limit); they will be picked up on the next run only if still new.`);
-    }
-    void fetched;
   }
 
   // ── Off-market: active rows in scraped zips that no longer appear ─

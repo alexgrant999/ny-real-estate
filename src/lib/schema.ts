@@ -42,6 +42,7 @@ export const SCHEMA_SQL = `
     off_market_at             TEXT,
     price_delta_reported      INTEGER,
     first_seen_at             TEXT,
+    details_fetched_at        TEXT,
     imported_at               TEXT NOT NULL,
     created_at                TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -120,6 +121,7 @@ export function applySchema(db: BetterSqlite3.Database) {
   add('lot_sqft', 'INTEGER');
   add('year_built', 'INTEGER');
   add('first_seen_at', 'TEXT');
+  add('details_fetched_at', 'TEXT');
   add('available_at', 'TEXT');
   add('off_market_at', 'TEXT');
   add('price_delta_reported', 'INTEGER');

@@ -1,15 +1,21 @@
 /**
- * Zillow importer via RapidAPI (zillow-com1).
+ * Zillow importer via RapidAPI (zillow-com1). An optional second source; the default
+ * import is Redfin (scripts/scrape-redfin.ts), which needs no key.
  * API: https://rapidapi.com/apimaker/api/zillow-com1
  *
  * Strategy (minimises requests):
- *  Phase 1 – propertyExtendedSearch by zip code (1 req per zip, ~40 listings each)
+ *  Phase 1 – propertyExtendedSearch by zip code (1 req per active town, ~40 listings each)
  *  Phase 2 – propertyDetails only for listings with no price history yet (new listings)
  *
- * Free tier: 500 req/month. With 15 zip codes = 15 search reqs + up to 485 detail reqs.
- * Run weekly and you'll stay well within limits.
+ * Free tier: 500 req/month. With ~21 active towns that is 21 search reqs + up to ~480
+ * detail reqs. Run weekly and you'll stay well within limits.
+ *
+ * Needs RAPIDAPI_KEY in .env.local. Run through: npx tsx scripts/import.ts zillow
  */
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
+import { TOWNS, type Region } from '../../src/lib/areas';
+import { acresToSqft } from '../../src/lib/utils';
+import type { ListingType } from '../../src/lib/types';
 
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const BASE_URL = 'https://zillow-com1.p.rapidapi.com';
@@ -18,31 +24,15 @@ const HEADERS = () => ({
   'X-RapidAPI-Host': 'zillow-com1.p.rapidapi.com',
 });
 
-// Zip codes → neighborhood + borough mapping
-// Focus on the most active areas for buyers
-const ZIP_NEIGHBORHOODS: Record<string, { neighborhood: string; borough: 'Manhattan' | 'Brooklyn' }> = {
-  // Manhattan
-  '10001': { neighborhood: 'Chelsea', borough: 'Manhattan' },
-  '10003': { neighborhood: 'East Village', borough: 'Manhattan' },
-  '10011': { neighborhood: 'Chelsea', borough: 'Manhattan' },
-  '10012': { neighborhood: 'SoHo', borough: 'Manhattan' },
-  '10013': { neighborhood: 'Tribeca', borough: 'Manhattan' },
-  '10014': { neighborhood: 'Greenwich Village', borough: 'Manhattan' },
-  '10019': { neighborhood: 'Midtown West', borough: 'Manhattan' },
-  '10023': { neighborhood: 'Upper West Side', borough: 'Manhattan' },
-  '10024': { neighborhood: 'Upper West Side', borough: 'Manhattan' },
-  '10025': { neighborhood: 'Upper West Side', borough: 'Manhattan' },
-  '10028': { neighborhood: 'Upper East Side', borough: 'Manhattan' },
-  '10065': { neighborhood: 'Upper East Side', borough: 'Manhattan' },
-  // Brooklyn
-  '11201': { neighborhood: 'Brooklyn Heights / DUMBO', borough: 'Brooklyn' },
-  '11211': { neighborhood: 'Williamsburg', borough: 'Brooklyn' },
-  '11215': { neighborhood: 'Park Slope', borough: 'Brooklyn' },
-  '11217': { neighborhood: 'Boerum Hill', borough: 'Brooklyn' },
-  '11222': { neighborhood: 'Greenpoint', borough: 'Brooklyn' },
-  '11231': { neighborhood: 'Carroll Gardens', borough: 'Brooklyn' },
-  '11238': { neighborhood: 'Prospect Heights', borough: 'Brooklyn' },
-};
+// Everything Zillow lists in the Catskills, not just apartments.
+const HOME_TYPES = 'Houses,Townhomes,Multi-family,Condos,LotsLand,Manufactured';
+
+interface ZipMeta { neighborhood: string; region: Region }
+
+// Zip codes → town + region, from the active towns in src/lib/areas.ts
+const ZIP_TOWNS: Record<string, ZipMeta> = Object.fromEntries(
+  TOWNS.filter(t => t.active).map(t => [t.zip, { neighborhood: t.name, region: t.region }])
+);
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -64,25 +54,40 @@ function parsePriceString(s: string | null | undefined): number | null {
   return isNaN(n) || n === 0 ? null : n;
 }
 
-function normaliseHomeType(raw: string | null | undefined): string | null {
+/** Zillow's homeType codes → our ListingType names. */
+function normaliseHomeType(raw: string | null | undefined): ListingType | null {
   if (!raw) return null;
-  const map: Record<string, string> = {
-    CONDO: 'Condo', APARTMENT: 'Condo', MULTI_FAMILY: 'Multi-family',
-    TOWNHOUSE: 'Townhouse', COOP: 'Co-op', SINGLE_FAMILY: 'Single-family',
-  };
-  return map[raw.toUpperCase()] ?? raw;
+  switch (raw.toUpperCase()) {
+    case 'SINGLE_FAMILY': return 'House';
+    case 'LOT':
+    case 'LAND': return 'Land';
+    case 'MANUFACTURED': return 'Manufactured';
+    case 'MULTI_FAMILY': return 'Multi-family';
+    case 'CONDO':
+    case 'APARTMENT': return 'Condo';
+    case 'TOWNHOUSE': return 'Townhouse';
+    case 'COOP': return 'Co-op';
+    default: return 'Other';
+  }
+}
+
+/** Zillow reports lots as lotAreaValue + lotAreaUnit ('acres' or 'sqft'); we store sqft. */
+function lotSqftFrom(value: unknown, unit: unknown): number | null {
+  const n = Number(value);
+  if (!n || Number.isNaN(n) || n <= 0) return null;
+  return String(unit ?? '').toLowerCase().startsWith('acre') ? acresToSqft(n) : Math.round(n);
 }
 
 // ─── Phase 1: search ──────────────────────────────────────────────────────────
 
 async function searchZip(
   zipCode: string,
-  meta: { neighborhood: string; borough: 'Manhattan' | 'Brooklyn' }
-): Promise<{ zpid: string; meta: typeof meta; searchData: Record<string, unknown> }[]> {
+  meta: ZipMeta
+): Promise<{ zpid: string; meta: ZipMeta; searchData: Record<string, unknown> }[]> {
   const data = await apiFetch('propertyExtendedSearch', {
     location: zipCode,
     status_type: 'ForSale',
-    home_type: 'Condos,Apartments,Townhomes',
+    home_type: HOME_TYPES,
   }) as Record<string, unknown>;
 
   const props = (data?.props ?? data?.results ?? []) as Record<string, unknown>[];
@@ -114,23 +119,27 @@ export async function importZillow(db: Database.Database, logId: number) {
 
   const insertListing = db.prepare(`
     INSERT INTO listings (
-      external_id, source, address, unit, neighborhood, borough, zip_code, lat, lng,
-      bedrooms, bathrooms, sqft, price, price_per_sqft, hoa_fee, tax_annual,
-      listing_status, listing_type, days_on_market, listed_date,
+      external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
+      bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
+      listing_status, listing_type, listing_category, days_on_market, listed_date,
       last_price_reduction_date, original_price, price_reduction_amount, price_reduction_pct,
-      description, image_url, listing_url, imported_at
+      description, image_url, listing_url, first_seen_at, imported_at
     ) VALUES (
-      @external_id, @source, @address, @unit, @neighborhood, @borough, @zip_code, @lat, @lng,
-      @bedrooms, @bathrooms, @sqft, @price, @price_per_sqft, @hoa_fee, @tax_annual,
-      @listing_status, @listing_type, @days_on_market, @listed_date,
+      @external_id, @source, @address, @unit, @neighborhood, @region, @zip_code, @lat, @lng,
+      @bedrooms, @bathrooms, @sqft, @lot_sqft, @year_built, @price, @price_per_sqft, @hoa_fee, @tax_annual,
+      @listing_status, @listing_type, 'sale', @days_on_market, @listed_date,
       @last_price_reduction_date, @original_price, @price_reduction_amount, @price_reduction_pct,
-      @description, @image_url, @listing_url, @imported_at
+      @description, @image_url, @listing_url, @first_seen_at, @imported_at
     )
     ON CONFLICT(external_id) DO UPDATE SET
+      region          = excluded.region,
+      lot_sqft        = COALESCE(excluded.lot_sqft, listings.lot_sqft),
+      year_built      = COALESCE(excluded.year_built, listings.year_built),
       price           = excluded.price,
       price_per_sqft  = excluded.price_per_sqft,
       days_on_market  = excluded.days_on_market,
       listing_status  = excluded.listing_status,
+      off_market_at   = NULL,
       last_price_reduction_date = excluded.last_price_reduction_date,
       price_reduction_amount    = excluded.price_reduction_amount,
       price_reduction_pct       = excluded.price_reduction_pct,
@@ -147,13 +156,14 @@ export async function importZillow(db: Database.Database, logId: number) {
     UPDATE import_logs SET listings_added = ?, listings_updated = ? WHERE id = ?
   `);
 
+  const today = new Date().toISOString().slice(0, 10);
   let added = 0, updated = 0, reqCount = 0;
 
   // ── Phase 1: search all zips ───────────────────────────────────────────────
   console.log('\n── Phase 1: searching zip codes ─────────────────────────────');
-  const allResults: { zpid: string; meta: { neighborhood: string; borough: 'Manhattan' | 'Brooklyn' }; searchData: Record<string, unknown> }[] = [];
+  const allResults: { zpid: string; meta: ZipMeta; searchData: Record<string, unknown> }[] = [];
 
-  for (const [zip, meta] of Object.entries(ZIP_NEIGHBORHOODS)) {
+  for (const [zip, meta] of Object.entries(ZIP_TOWNS)) {
     process.stdout.write(`  ${zip} (${meta.neighborhood})... `);
     try {
       const results = await searchZip(zip, meta);
@@ -166,7 +176,7 @@ export async function importZillow(db: Database.Database, logId: number) {
     await sleep(600);
   }
 
-  console.log(`\n  Found ${allResults.length} listings across ${Object.keys(ZIP_NEIGHBORHOODS).length} zip codes`);
+  console.log(`\n  Found ${allResults.length} listings across ${Object.keys(ZIP_TOWNS).length} zip codes`);
 
   // ── Upsert from search data ────────────────────────────────────────────────
   console.log('\n── Upserting from search data ───────────────────────────────');
@@ -182,8 +192,9 @@ export async function importZillow(db: Database.Database, logId: number) {
     const reductionPct = reductionRaw && originalPrice > 0
       ? Math.round((reductionRaw / originalPrice) * 1000) / 10
       : null;
-    const sqft = Number(s.livingArea ?? s.lotAreaValue ?? 0) || null;
-    const pricePerSqft = sqft && price ? Math.round(price / sqft) : null;
+    const listingType = normaliseHomeType((s.propertyType as string | undefined) ?? (s.homeType as string | undefined));
+    const sqft = Number(s.livingArea ?? 0) || null;
+    const pricePerSqft = sqft && price && listingType !== 'Land' ? Math.round(price / sqft) : null;
 
     const row = {
       external_id: externalId,
@@ -191,21 +202,23 @@ export async function importZillow(db: Database.Database, logId: number) {
       address: String(s.address ?? s.streetAddress ?? ''),
       unit: (s.unit as string | null) ?? null,
       neighborhood: meta.neighborhood,
-      borough: meta.borough,
+      region: meta.region,
       zip_code: String(s.zipcode ?? s.zip ?? (s.address as string)?.match(/\d{5}/)?.[0] ?? ''),
       lat: Number(s.latitude ?? s.lat ?? 0) || null,
       lng: Number(s.longitude ?? s.lon ?? 0) || null,
       bedrooms: Number(s.bedrooms ?? s.beds ?? 0) || null,
       bathrooms: Number(s.bathrooms ?? s.baths ?? 0) || null,
       sqft,
+      lot_sqft: lotSqftFrom(s.lotAreaValue, s.lotAreaUnit),
+      year_built: Number(s.yearBuilt ?? 0) || null,
       price,
       price_per_sqft: pricePerSqft,
       hoa_fee: null as number | null,
       tax_annual: null as number | null,
       listing_status: 'for_sale',
-      listing_type: normaliseHomeType(s.propertyType as string ?? s.homeType as string),
-      days_on_market: Number(s.daysOnMarket ?? s.daysOnZillow ?? 0) || null,
-      listed_date: (s.dateSold ?? s.datePosted ?? null) as string | null,
+      listing_type: listingType,
+      days_on_market: Number(s.daysOnZillow ?? s.daysOnMarket ?? 0) || null,
+      listed_date: (s.datePosted ?? null) as string | null,
       last_price_reduction_date: null as string | null,
       original_price: originalPrice !== price ? originalPrice : null,
       price_reduction_amount: reductionRaw,
@@ -213,6 +226,7 @@ export async function importZillow(db: Database.Database, logId: number) {
       description: null as string | null,
       image_url: (s.imgSrc ?? s.image ?? null) as string | null,
       listing_url: `https://www.zillow.com/homes/${zpid}_zpid/`,
+      first_seen_at: today,
       imported_at: new Date().toISOString(),
     };
 
@@ -249,6 +263,8 @@ export async function importZillow(db: Database.Database, logId: number) {
             unit         = COALESCE(@unit, unit),
             hoa_fee      = @hoa_fee,
             tax_annual   = @tax_annual,
+            lot_sqft     = COALESCE(@lot_sqft, lot_sqft),
+            year_built   = COALESCE(@year_built, year_built),
             description  = @description,
             listed_date  = COALESCE(@listed_date, listed_date),
             last_price_reduction_date = @last_price_reduction_date
@@ -258,6 +274,8 @@ export async function importZillow(db: Database.Database, logId: number) {
           unit: (p.unit as string | null) ?? null,
           hoa_fee: Number(p.hoaFee ?? 0) || null,
           tax_annual: Number(p.annualTaxAmount ?? 0) || null,
+          lot_sqft: lotSqftFrom(p.lotAreaValue, p.lotAreaUnit),
+          year_built: Number(p.yearBuilt ?? 0) || null,
           description: (p.description as string | null) ?? null,
           listed_date: (p.datePosted as string | null) ?? null,
           last_price_reduction_date: (
@@ -318,12 +336,12 @@ export async function testZillowKey(): Promise<{ ok: boolean; message: string }>
   }
   try {
     const data = await apiFetch('propertyExtendedSearch', {
-      location: '10013',
+      location: '12498',
       status_type: 'ForSale',
-      home_type: 'Condos',
+      home_type: 'Houses',
     }) as Record<string, unknown>;
     const count = ((data?.props ?? data?.results ?? []) as unknown[]).length;
-    return { ok: true, message: `Connected — got ${count} listings for Tribeca (10013)` };
+    return { ok: true, message: `Connected — got ${count} listings for Woodstock (12498)` };
   } catch (e) {
     return { ok: false, message: (e as Error).message };
   }

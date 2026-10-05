@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
     const logId = db.prepare(`INSERT INTO import_logs (source, status) VALUES ('demo', 'running')`).run().lastInsertRowid;
     const logPath = path.join(dataDir, `import-${logId}.log`);
     const scriptPath = path.join(process.cwd(), 'scripts', 'seed-demo.ts');
-    launch(`npx tsx "${scriptPath}" > "${logPath}" 2>&1`);
+    launch(`npx tsx "${scriptPath}" --log-id ${logId} > "${logPath}" 2>&1`);
     return NextResponse.json({ logId, status: 'started' });
   }
 

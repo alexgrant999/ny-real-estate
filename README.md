@@ -41,7 +41,7 @@ Round Top, Ashland, Prattsville, Cairo, Catskill) are configured but off by defa
 
 | Command | What it does |
 |---------|--------------|
-| `npm run scrape` | Redfin import. Flags: `--towns woodstock,hunter`, `--region tannersville`, `--all-towns`, `--sale-only`, `--rental-only`, `--no-details`, `--details-limit N`, `--debug` |
+| `npm run scrape` | Redfin import. Flags: `--towns woodstock,hunter`, `--region tannersville`, `--all-towns`, `--sale-only`, `--rental-only`, `--no-details`, `--details-limit N` (default 120), `--debug` |
 | `npm run seed` | Demo listings, benchmarks and a year of market history |
 | `npm run benchmarks` | Recompute median $/sqft per town from current listings |
 | `npm run snapshot` | Write this month's market snapshot from current listings |

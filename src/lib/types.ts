@@ -57,6 +57,8 @@ export interface Listing {
   off_market_at: string | null;
   price_delta_reported: number | null;
   first_seen_at: string | null;
+  /** When the Redfin detail payload (MLS history, taxes) was last fetched. */
+  details_fetched_at: string | null;
   imported_at: string;
   created_at: string;
   // joined from benchmarks
