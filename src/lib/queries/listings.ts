@@ -1,6 +1,14 @@
 import { getDb } from '../db';
 import type { Listing, ListingFilters, PriceHistoryEntry, DealPreset } from '../types';
-import { AREA_ALIASES, expandArea } from '../neighborhoods';
+import { DEFAULT_SALE_CAP, DEFAULT_RENT_CAP } from '../config';
+import { acresToSqft } from '../utils';
+
+const BENCHMARK_JOIN = `
+  LEFT JOIN neighborhood_benchmarks nb
+    ON nb.neighborhood = l.neighborhood
+    AND nb.region = l.region
+    AND nb.bedrooms IS NULL
+`;
 
 export function getListings(filters: ListingFilters): { listings: Listing[]; total: number } {
   const db = getDb();
@@ -13,20 +21,19 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
   } else if (filters.category === 'rental') {
     conditions.push("l.listing_category = 'rental'");
   } else if (!filters.noPriceCap) {
-    // Default "all": rentals < $4k, sales < $1.3M
     conditions.push(
-      "((l.listing_category = 'rental' AND l.price <= 4000) OR (l.listing_category = 'sale' AND l.price <= 1300000))"
+      "((l.listing_category = 'rental' AND l.price <= ?) OR (l.listing_category = 'sale' AND l.price <= ?))"
     );
+    params.push(DEFAULT_RENT_CAP, DEFAULT_SALE_CAP);
   }
 
-  if (filters.borough) {
-    conditions.push('l.borough = ?');
-    params.push(filters.borough);
+  if (filters.region) {
+    conditions.push('l.region = ?');
+    params.push(filters.region);
   }
   if (filters.neighborhoods && filters.neighborhoods.length > 0) {
-    const names = filters.neighborhoods.flatMap(expandArea);
-    conditions.push(`l.neighborhood IN (${names.map(() => '?').join(',')})`);
-    params.push(...names);
+    conditions.push(`l.neighborhood IN (${filters.neighborhoods.map(() => '?').join(',')})`);
+    params.push(...filters.neighborhoods);
   }
   if (filters.minPrice !== undefined) {
     conditions.push('l.price >= ?');
@@ -52,6 +59,10 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
     conditions.push('l.days_on_market <= ?');
     params.push(filters.maxDom);
   }
+  if (filters.minAcres !== undefined && filters.minAcres > 0) {
+    conditions.push('l.lot_sqft >= ?');
+    params.push(acresToSqft(filters.minAcres));
+  }
   if (filters.priceReduced) {
     conditions.push('l.price_reduction_amount > 0');
   }
@@ -73,6 +84,7 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
     price_reduction_amount: 'l.price_reduction_amount',
     price_per_sqft: 'l.price_per_sqft',
     sqft: 'l.sqft',
+    lot_sqft: 'l.lot_sqft',
   };
   const sortCol = sortColumnMap[filters.sortBy ?? 'price'] ?? 'l.price';
   const sortDir = filters.sortDir === 'desc' ? 'DESC' : 'ASC';
@@ -80,21 +92,15 @@ export function getListings(filters: ListingFilters): { listings: Listing[]; tot
   const offset = ((filters.page ?? 1) - 1) * pageSize;
 
   const sql = `
-    SELECT l.*,
-           nb.median_ppsf as neighborhood_median_ppsf
+    SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
     FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb
-      ON nb.neighborhood = l.neighborhood
-      AND nb.borough = l.borough
-      AND nb.bedrooms IS NULL
+    ${BENCHMARK_JOIN}
     WHERE ${whereClause}
-    ORDER BY ${sortCol} ${sortDir} NULLS LAST
+    ORDER BY ${sortCol} ${sortDir} NULLS LAST, l.id ASC
     LIMIT ? OFFSET ?
   `;
 
-  const countSql = `
-    SELECT COUNT(*) as count FROM listings l WHERE ${whereClause}
-  `;
+  const countSql = `SELECT COUNT(*) as count FROM listings l WHERE ${whereClause}`;
 
   const listings = db.prepare(sql).all(...params, pageSize, offset) as Listing[];
   const { count } = db.prepare(countSql).get(...params) as { count: number };
@@ -107,10 +113,7 @@ export function getListingById(id: number): Listing | null {
   return db.prepare(`
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
     FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb
-      ON nb.neighborhood = l.neighborhood
-      AND nb.borough = l.borough
-      AND nb.bedrooms IS NULL
+    ${BENCHMARK_JOIN}
     WHERE l.id = ?
   `).get(id) as Listing | null;
 }
@@ -122,10 +125,7 @@ export function getListingsByIds(ids: number[]): Listing[] {
   return db.prepare(`
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
     FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb
-      ON nb.neighborhood = l.neighborhood
-      AND nb.borough = l.borough
-      AND nb.bedrooms IS NULL
+    ${BENCHMARK_JOIN}
     WHERE l.id IN (${placeholders})
   `).all(...ids) as Listing[];
 }
@@ -139,37 +139,26 @@ export function getPriceHistory(listingId: number): PriceHistoryEntry[] {
   `).all(listingId) as PriceHistoryEntry[];
 }
 
-export function getDistinctNeighborhoods(category?: string): { neighborhood: string; borough: string }[] {
+/** Towns present in the data, for the filter dropdown. */
+export function getDistinctTowns(category?: string): { neighborhood: string; region: string }[] {
   const db = getDb();
   const rows = (category && category !== 'all'
     ? db.prepare(`
-        SELECT DISTINCT neighborhood, borough FROM listings
+        SELECT DISTINCT neighborhood, region FROM listings
         WHERE listing_status = 'for_sale' AND listing_category = ?
-        ORDER BY borough, neighborhood
+        ORDER BY region, neighborhood
       `).all(category)
     : db.prepare(`
-        SELECT DISTINCT neighborhood, borough FROM listings
+        SELECT DISTINCT neighborhood, region FROM listings
         WHERE listing_status = 'for_sale'
-        ORDER BY borough, neighborhood
-      `).all()) as { neighborhood: string; borough: string }[];
-
-  // Offer the parent area as an option whenever only its sub-neighborhoods are in the data
-  const present = new Set(rows.map(r => r.neighborhood));
-  const parents: { neighborhood: string; borough: string }[] = [];
-  for (const [parent, children] of Object.entries(AREA_ALIASES)) {
-    if (present.has(parent)) continue;
-    const child = rows.find(r => children.includes(r.neighborhood));
-    if (child) parents.push({ neighborhood: parent, borough: child.borough });
-  }
-
-  return [...rows, ...parents].sort(
-    (a, b) => a.borough.localeCompare(b.borough) || a.neighborhood.localeCompare(b.neighborhood)
-  );
+        ORDER BY region, neighborhood
+      `).all()) as { neighborhood: string; region: string }[];
+  return rows;
 }
 
 export function getListingStats() {
   const db = getDb();
-  const stats = db.prepare(`
+  return db.prepare(`
     SELECT
       COUNT(*) as total_listings,
       SUM(CASE WHEN listing_category = 'sale' THEN 1 ELSE 0 END) as sale_count,
@@ -191,37 +180,32 @@ export function getListingStats() {
     min_price: number;
     max_price: number;
   };
-  return stats;
 }
 
 const DEAL_QUERIES: Record<DealPreset, string> = {
   price_reduced_7d: `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
-    FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb ON nb.neighborhood = l.neighborhood AND nb.borough = l.borough AND nb.bedrooms IS NULL
+    FROM listings l ${BENCHMARK_JOIN}
     WHERE l.listing_status = 'for_sale'
       AND l.last_price_reduction_date >= date('now', '-7 days')
     ORDER BY l.price_reduction_pct DESC NULLS LAST
   `,
   price_reduced_30d: `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
-    FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb ON nb.neighborhood = l.neighborhood AND nb.borough = l.borough AND nb.bedrooms IS NULL
+    FROM listings l ${BENCHMARK_JOIN}
     WHERE l.listing_status = 'for_sale'
       AND l.last_price_reduction_date >= date('now', '-30 days')
     ORDER BY l.price_reduction_pct DESC NULLS LAST
   `,
   dom_over_60: `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
-    FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb ON nb.neighborhood = l.neighborhood AND nb.borough = l.borough AND nb.bedrooms IS NULL
+    FROM listings l ${BENCHMARK_JOIN}
     WHERE l.listing_status = 'for_sale' AND l.days_on_market >= 60
     ORDER BY l.days_on_market DESC NULLS LAST
   `,
   dom_over_90: `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
-    FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb ON nb.neighborhood = l.neighborhood AND nb.borough = l.borough AND nb.bedrooms IS NULL
+    FROM listings l ${BENCHMARK_JOIN}
     WHERE l.listing_status = 'for_sale' AND l.days_on_market >= 90
     ORDER BY l.days_on_market DESC NULLS LAST
   `,
@@ -232,17 +216,17 @@ const DEAL_QUERIES: Record<DealPreset, string> = {
     FROM listings l
     JOIN neighborhood_benchmarks nb
       ON nb.neighborhood = l.neighborhood
-      AND nb.borough = l.borough
+      AND nb.region = l.region
       AND nb.bedrooms IS NULL
     WHERE l.listing_status = 'for_sale'
+      AND l.listing_category = 'sale'
       AND l.price_per_sqft IS NOT NULL
       AND l.price_per_sqft < nb.median_ppsf
     ORDER BY ppsf_discount_pct DESC NULLS LAST
   `,
   big_reductions: `
     SELECT l.*, nb.median_ppsf as neighborhood_median_ppsf
-    FROM listings l
-    LEFT JOIN neighborhood_benchmarks nb ON nb.neighborhood = l.neighborhood AND nb.borough = l.borough AND nb.bedrooms IS NULL
+    FROM listings l ${BENCHMARK_JOIN}
     WHERE l.listing_status = 'for_sale' AND l.price_reduction_pct >= 5
     ORDER BY l.price_reduction_pct DESC NULLS LAST
   `,
@@ -259,8 +243,7 @@ export function getDealCounts(): Record<DealPreset, number> {
   const db = getDb();
   const counts: Record<string, number> = {};
   for (const [preset, sql] of Object.entries(DEAL_QUERIES)) {
-    const countSql = `SELECT COUNT(*) as count FROM (${sql})`;
-    const row = db.prepare(countSql).get() as { count: number };
+    const row = db.prepare(`SELECT COUNT(*) as count FROM (${sql})`).get() as { count: number };
     counts[preset] = row.count;
   }
   return counts as Record<DealPreset, number>;

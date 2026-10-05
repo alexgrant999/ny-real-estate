@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { APP_NAME } from '@/lib/config';
 
 const links = [
   { href: '/listings', label: 'Listings' },
@@ -17,7 +18,7 @@ export function Navbar() {
     <nav className="border-b border-gray-200 bg-white sticky top-0 z-50">
       <div className="max-w-screen-2xl mx-auto px-4 flex items-center h-14 gap-8">
         <Link href="/" className="font-bold text-lg text-gray-900 shrink-0">
-          NYC Apartments
+          {APP_NAME}
         </Link>
         <div className="flex items-center gap-1">
           {links.map(l => (

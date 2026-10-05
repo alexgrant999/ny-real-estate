@@ -44,15 +44,34 @@ export function bedsLabel(beds: number | null): string {
   return `${beds}BR`;
 }
 
-/** Build StreetEasy search URL for a given address in NYC */
-export function streetEasyUrl(address: string, unit?: string | null): string {
-  const query = encodeURIComponent([address, unit ? `#${unit}` : '', 'New York, NY'].filter(Boolean).join(' '));
-  return `https://streeteasy.com/for-sale/nyc?q=${query}`;
+const SQFT_PER_ACRE = 43_560;
+
+export function sqftToAcres(lotSqft: number): number {
+  return lotSqft / SQFT_PER_ACRE;
+}
+
+export function acresToSqft(acres: number): number {
+  return Math.round(acres * SQFT_PER_ACRE);
+}
+
+/** Lot size the way Catskills listings quote it: acres, unless it is a small village lot. */
+export function lotLabel(lotSqft: number | null): string {
+  if (!lotSqft || lotSqft <= 0) return '—';
+  const acres = sqftToAcres(lotSqft);
+  if (acres >= 0.25) return `${acres < 10 ? acres.toFixed(2).replace(/\.?0+$/, '') : Math.round(acres)} ac`;
+  return `${lotSqft.toLocaleString()} sqft`;
+}
+
+/** Search Redfin for an address when a listing carries no direct Redfin link. */
+export function redfinSearchUrl(address: string, town: string): string {
+  const query = encodeURIComponent(`${address}, ${town}, NY`);
+  return `https://www.redfin.com/stingray/do/location-search?location=${query}`;
 }
 
 /** Build Zillow search URL for a given address */
-export function zillowSearchUrl(address: string): string {
-  return `https://www.zillow.com/homes/${encodeURIComponent(address)}_rb/`;
+export function zillowSearchUrl(address: string, town?: string): string {
+  const query = [address, town, 'NY'].filter(Boolean).join(', ');
+  return `https://www.zillow.com/homes/${encodeURIComponent(query)}_rb/`;
 }
 
 export function buildListingUrl(filters: Record<string, string | number | boolean | undefined>): string {

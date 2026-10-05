@@ -2,7 +2,8 @@
 import { getListingsByIds } from '@/lib/queries/listings';
 import { Badge } from '@/components/ui/Badge';
 import { PriceHistoryChart } from '@/components/charts/PriceHistoryChart';
-import { formatPriceFull, formatPrice, domColor, domLabel, bedsLabel } from '@/lib/utils';
+import { formatPriceFull, formatPrice, domColor, domLabel, bedsLabel, lotLabel } from '@/lib/utils';
+import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
 
 interface PageProps {
@@ -57,7 +58,7 @@ export default async function ComparePage({ searchParams }: PageProps) {
                   <div className="font-semibold text-gray-900 text-sm">
                     {l.address}{l.unit ? ` #${l.unit}` : ''}
                   </div>
-                  <div className="text-xs text-gray-500">{l.neighborhood}, {l.borough}</div>
+                  <div className="text-xs text-gray-500">{l.neighborhood}, {REGION_LABELS[l.region]}</div>
                 </th>
               ))}
             </tr>
@@ -86,6 +87,8 @@ export default async function ComparePage({ searchParams }: PageProps) {
             />
             <Row label="Beds / Baths" values={listings.map(l => `${bedsLabel(l.bedrooms)} / ${l.bathrooms ?? '—'}ba`)} />
             <Row label="Sqft" values={listings.map(l => l.sqft?.toLocaleString() ?? '—')} />
+            <Row label="Lot" values={listings.map(l => lotLabel(l.lot_sqft))} />
+            <Row label="Year built" values={listings.map(l => l.year_built ? String(l.year_built) : '—')} />
             <Row
               label="$/sqft"
               values={listings.map(l => {

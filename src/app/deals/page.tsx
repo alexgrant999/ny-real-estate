@@ -2,6 +2,7 @@ import { getDealListings, getDealCounts } from '@/lib/queries/listings';
 import { Badge } from '@/components/ui/Badge';
 import { formatPrice, domColor, domLabel, bedsLabel } from '@/lib/utils';
 import type { DealPreset } from '@/lib/types';
+import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
 
 const PRESETS: { id: DealPreset; title: string; description: string; color: string }[] = [
@@ -38,7 +39,7 @@ const PRESETS: { id: DealPreset; title: string; description: string; color: stri
   {
     id: 'ppsf_below_median',
     title: 'Below Median $/sqft',
-    description: 'Priced below neighborhood median price per sqft',
+    description: 'Priced below the town median price per sqft',
     color: 'bg-green-50 border-green-200 text-green-800',
   },
 ];
@@ -55,7 +56,7 @@ export default async function DealsPage({ searchParams }: PageProps) {
   return (
     <div className="max-w-screen-2xl mx-auto px-4 py-6">
       <h1 className="text-2xl font-bold text-gray-900 mb-1">Deals & Opportunities</h1>
-      <p className="text-gray-500 text-sm mb-6">Pre-built queries to find the best deals in Manhattan and Brooklyn.</p>
+      <p className="text-gray-500 text-sm mb-6">Pre-built queries to find the best deals in the Woodstock and Tannersville areas.</p>
 
       {/* Preset grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
@@ -92,7 +93,7 @@ export default async function DealsPage({ searchParams }: PageProps) {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-2 text-gray-600 font-medium">Address</th>
-                <th className="text-left px-4 py-2 text-gray-600 font-medium">Neighborhood</th>
+                <th className="text-left px-4 py-2 text-gray-600 font-medium">Town</th>
                 <th className="text-right px-4 py-2 text-gray-600 font-medium">Price</th>
                 <th className="text-right px-4 py-2 text-gray-600 font-medium">Reduction</th>
                 <th className="text-right px-4 py-2 text-gray-600 font-medium">$/sqft</th>
@@ -120,7 +121,7 @@ export default async function DealsPage({ searchParams }: PageProps) {
                         {l.address}{l.unit ? ` #${l.unit}` : ''}
                       </Link>
                     </td>
-                    <td className="px-4 py-2.5 text-gray-600">{l.neighborhood}, {l.borough}</td>
+                    <td className="px-4 py-2.5 text-gray-600">{l.neighborhood}, {REGION_LABELS[l.region]}</td>
                     <td className="px-4 py-2.5 text-right font-semibold text-gray-900">{formatPrice(l.price)}</td>
                     <td className="px-4 py-2.5 text-right">
                       {l.price_reduction_pct

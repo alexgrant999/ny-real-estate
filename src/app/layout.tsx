@@ -2,10 +2,11 @@ import type { Metadata } from 'next';
 import './globals.css';
 import 'leaflet/dist/leaflet.css';
 import { Navbar } from '@/components/nav/Navbar';
+import { APP_NAME, APP_TAGLINE } from '@/lib/config';
 
 export const metadata: Metadata = {
-  title: 'NYC Apartment Finder – Manhattan & Brooklyn',
-  description: 'Compare apartments for sale in Manhattan and Brooklyn. Track days on market, price reductions, and find the best deals.',
+  title: `${APP_NAME} – ${APP_TAGLINE}`,
+  description: 'Compare homes and land for sale and rent in the Woodstock and Tannersville areas of the Catskills. Track days on market, price reductions, and find the best deals.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

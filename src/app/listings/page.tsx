@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { getListings, getDistinctNeighborhoods, getListingStats } from '@/lib/queries/listings';
+import { getListings, getDistinctTowns, getListingStats } from '@/lib/queries/listings';
 import { ListingsTable } from '@/components/listings/ListingsTable';
 import { ListingsFilters } from '@/components/listings/ListingsFilters';
 import type { ListingFilters } from '@/lib/types';
@@ -11,13 +11,14 @@ interface PageProps {
 export default async function ListingsPage({ searchParams }: PageProps) {
   const filters: ListingFilters = {
     category: (searchParams.category as ListingFilters['category']) || 'all',
-    borough: (searchParams.borough as ListingFilters['borough']) || undefined,
+    region: (searchParams.region as ListingFilters['region']) || undefined,
     neighborhoods: searchParams.neighborhood ? [searchParams.neighborhood] : undefined,
     minPrice: searchParams.minPrice ? Number(searchParams.minPrice) : undefined,
     maxPrice: searchParams.maxPrice ? Number(searchParams.maxPrice) : undefined,
     minBedrooms: searchParams.minBedrooms ? Number(searchParams.minBedrooms) : undefined,
     minDom: searchParams.minDom ? Number(searchParams.minDom) : undefined,
     maxDom: searchParams.maxDom ? Number(searchParams.maxDom) : undefined,
+    minAcres: searchParams.minAcres ? Number(searchParams.minAcres) : undefined,
     priceReduced: searchParams.priceReduced === 'true',
     listingType: searchParams.listingType || undefined,
     sortBy: (searchParams.sortBy as ListingFilters['sortBy']) || 'price',
@@ -27,7 +28,7 @@ export default async function ListingsPage({ searchParams }: PageProps) {
   };
 
   const { listings, total } = getListings(filters);
-  const neighborhoods = getDistinctNeighborhoods();
+  const towns = getDistinctTowns();
   const stats = getListingStats();
 
   return (
@@ -44,7 +45,7 @@ export default async function ListingsPage({ searchParams }: PageProps) {
       )}
 
       <Suspense>
-        <ListingsFilters neighborhoods={neighborhoods} />
+        <ListingsFilters towns={towns} />
       </Suspense>
 
       <div className="flex-1 overflow-auto bg-white">
@@ -55,10 +56,10 @@ export default async function ListingsPage({ searchParams }: PageProps) {
 
       {stats.total_listings === 0 && (
         <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center p-8">
-          <div className="text-5xl">🏙️</div>
+          <div className="text-5xl">🏔️</div>
           <h2 className="text-xl font-semibold text-gray-900">No listings yet</h2>
           <p className="text-gray-500 max-w-sm">
-            Load demo data to explore the app, or connect a real data source via the Import page.
+            Load demo data to explore the app, or import live Redfin listings from the Import page.
           </p>
           <a
             href="/import"

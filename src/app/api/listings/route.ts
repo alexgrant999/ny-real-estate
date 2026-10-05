@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getListings, getDistinctNeighborhoods, getListingStats } from '@/lib/queries/listings';
+import { getListings, getDistinctTowns, getListingStats } from '@/lib/queries/listings';
 import type { ListingFilters } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
 
   const filters: ListingFilters = {
     category: (sp.get('category') as ListingFilters['category']) || 'all',
-    borough: (sp.get('borough') as ListingFilters['borough']) || undefined,
+    region: (sp.get('region') as ListingFilters['region']) || undefined,
     neighborhoods: sp.get('neighborhood')
       ? [sp.get('neighborhood')!]
       : sp.get('neighborhoods')
@@ -21,6 +21,7 @@ export async function GET(req: NextRequest) {
     maxBedrooms: sp.get('maxBedrooms') ? Number(sp.get('maxBedrooms')) : undefined,
     minDom: sp.get('minDom') ? Number(sp.get('minDom')) : undefined,
     maxDom: sp.get('maxDom') ? Number(sp.get('maxDom')) : undefined,
+    minAcres: sp.get('minAcres') ? Number(sp.get('minAcres')) : undefined,
     priceReduced: sp.get('priceReduced') === 'true',
     listingType: sp.get('listingType') || undefined,
     sortBy: (sp.get('sortBy') as ListingFilters['sortBy']) || 'price',
@@ -35,8 +36,8 @@ export async function GET(req: NextRequest) {
   };
 
   const { listings, total } = getListings(filters);
-  const neighborhoods = getDistinctNeighborhoods();
+  const towns = getDistinctTowns();
   const stats = getListingStats();
 
-  return NextResponse.json({ listings, total, neighborhoods, stats, page: filters.page, pageSize: filters.pageSize });
+  return NextResponse.json({ listings, total, towns, stats, page: filters.page, pageSize: filters.pageSize });
 }

@@ -1,20 +1,20 @@
 import { getDb } from '../db';
 
-export function getMarketAreas(areaType?: string): { area_name: string; borough: string; area_type: string }[] {
+export function getMarketAreas(areaType?: string): { area_name: string; region: string; area_type: string }[] {
   const db = getDb();
   if (areaType) {
     return db.prepare(`
-      SELECT DISTINCT area_name, borough, area_type
+      SELECT DISTINCT area_name, region, area_type
       FROM market_trends
       WHERE area_type = ?
-      ORDER BY borough, area_name
-    `).all(areaType) as { area_name: string; borough: string; area_type: string }[];
+      ORDER BY region, area_name
+    `).all(areaType) as { area_name: string; region: string; area_type: string }[];
   }
   return db.prepare(`
-    SELECT DISTINCT area_name, borough, area_type
+    SELECT DISTINCT area_name, region, area_type
     FROM market_trends
-    ORDER BY borough, area_name
-  `).all() as { area_name: string; borough: string; area_type: string }[];
+    ORDER BY region, area_name
+  `).all() as { area_name: string; region: string; area_type: string }[];
 }
 
 export function getMarketTrend(

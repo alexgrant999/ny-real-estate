@@ -5,13 +5,13 @@ export const dynamic = 'force-dynamic';
 
 const ALL_METRICS = [
   'medianAskingPrice',
-  'medianSalesPrice',
-  'daysOnMarket',
+  'medianPricePerSqft',
+  'medianRent',
   'totalInventory',
+  'rentalInventory',
+  'daysOnMarket',
   'priceCutShare',
-  'saleListRatio',
-  'recordedSalesVolume',
-  'priceIndex',
+  'medianLotAcres',
 ];
 
 export async function GET(req: NextRequest) {
