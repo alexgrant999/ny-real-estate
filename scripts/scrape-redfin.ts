@@ -15,6 +15,7 @@
  *   npx tsx scripts/scrape-redfin.ts --rentals | --rental-only # include rentals / rentals only
  *   npx tsx scripts/scrape-redfin.ts --no-details             # skip per-listing price history / tax fetch
  *   npx tsx scripts/scrape-redfin.ts --details-limit 40       # cap detail fetches per run (default 120)
+ *   npx tsx scripts/scrape-redfin.ts --details-gap 30         # seconds between detail pages (default 75)
  *   npx tsx scripts/scrape-redfin.ts --debug                  # dump raw payloads to data/
  *
  * Per run:
@@ -51,6 +52,7 @@ const rentalOnly = flag('--rental-only');
 const noDetails = flag('--no-details');
 const debugMode = flag('--debug');
 const detailsLimit = parseInt(opt('--details-limit') ?? '120');
+const detailsGapMs = parseFloat(opt('--details-gap') ?? '75') * 1000;
 const externalLogId = opt('--log-id') ? parseInt(opt('--log-id')!) : null;
 const townsFilter = opt('--towns')?.split(',').map(s => s.trim()).filter(Boolean) ?? null;
 const regionFilter = opt('--region')?.toLowerCase() ?? null;
@@ -416,6 +418,13 @@ interface HistoryEvent { eventDescription?: string; price?: number; eventDate?: 
 // without cookies. The listing page itself still loads and carries the same payload
 // (propertyHistoryInfo events, taxesDue) escaped inside its inline server state, so the
 // details now come from the page.
+//
+// Listing pages sit behind an AWS WAF rule that lets roughly 5 tokenless requests per
+// 5 minutes through per IP, then answers 202 with a JavaScript challenge
+// (x-amzn-waf-action: challenge). Retrying does not clear it and keeps the window hot,
+// so a challenge ends the details pass and the rest waits for the next run.
+class WafChallengeError extends Error {}
+
 async function redfinPage(url: string): Promise<string> {
   let lastError = '';
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -427,8 +436,10 @@ async function redfinPage(url: string): Promise<string> {
       },
       signal: AbortSignal.timeout(30_000),
     });
-    // 202 with an empty body is Redfin's soft rate limit on page requests.
-    if (res.status === 429 || res.status === 403 || res.status === 202 || res.status >= 500) {
+    if (res.status === 202 || res.headers.get('x-amzn-waf-action')) {
+      throw new WafChallengeError('Redfin answered with a bot challenge');
+    }
+    if (res.status === 429 || res.status === 403 || res.status >= 500) {
       lastError = `HTTP ${res.status}`;
       const wait = attempt * 20_000;
       console.log(`${lastError}, waiting ${wait / 1000}s (retry ${attempt}/3)...`);
@@ -640,6 +651,10 @@ async function main() {
       await sleep(REQUEST_GAP_MS);
     }
   }
+  // A run where Redfin refused every town must fail loudly, not report an empty success.
+  if (categories.every(c => scrapedZips[c].size === 0)) {
+    throw new Error('Every town search failed; Redfin is probably blocking this machine');
+  }
 
   // ── Details: MLS price history + taxes ─────────────────────────
   // Every new sale listing gets a "listed" event right away so the chart has a start;
@@ -651,7 +666,9 @@ async function main() {
   const batch = candidates.slice(0, detailsLimit);
   if (batch.length) {
     console.log(`\n── Price history + taxes for ${batch.length} of ${candidates.length} listings without details ──`);
+    let fetched = 0;
     for (const c of batch) {
+      if (fetched > 0) await sleep(detailsGapMs);
       const propertyId = c.external_id.replace(/^rf-/, '');
       process.stdout.write(`  ${propertyId}... `);
       if (!c.listing_url || !c.listing_url.includes('redfin.com')) {
@@ -678,12 +695,16 @@ async function main() {
         });
         console.log(`${cycle.length} events${tax ? `, tax $${tax.toLocaleString()}` : ''}`);
       } catch (e) {
+        if (e instanceof WafChallengeError) {
+          console.log(`challenged after ${fetched} pages, stopping details for this run`);
+          break;
+        }
         console.log(`FAILED: ${(e as Error).message}`);
       }
-      await sleep(REQUEST_GAP_MS);
+      fetched++;
     }
-    if (candidates.length > batch.length) {
-      console.log(`  ${candidates.length - batch.length} listings still without details; the next run continues from there (raise --details-limit to do more per run).`);
+    if (candidates.length > fetched) {
+      console.log(`  ${candidates.length - fetched} listings still without details; the next run continues from there (raise --details-limit to do more per run).`);
     }
   }
 
