@@ -15,15 +15,14 @@
  *
  * Run standalone to backfill: npx tsx scripts/rollup-price-history.ts
  */
-import Database from 'better-sqlite3';
-import type BetterSqlite3 from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import type { Sql } from 'postgres';
+import { getSql, closeSql } from '../src/lib/db';
 import { applySchema } from '../src/lib/schema';
+import { loadEnv } from './env';
 
-export function rollupPriceHistory(db: BetterSqlite3.Database): { fromHistory: number; fromReported: number } {
+export async function rollupPriceHistory(sql: Sql): Promise<{ fromHistory: number; fromReported: number }> {
   // The first price we ever saw for a listing is its original asking price.
-  const fromHistory = db.prepare(`
+  const fromHistory = (await sql`
     UPDATE listings AS l
     SET original_price = h.first_price,
         price_reduction_amount = h.first_price - l.price,
@@ -40,10 +39,10 @@ export function rollupPriceHistory(db: BetterSqlite3.Database): { fromHistory: n
     ) AS h
     WHERE h.listing_id = l.id
       AND h.first_price > l.price
-  `).run().changes;
+  `).count;
 
   // Fall back to the source's reported delta only where we learned nothing ourselves.
-  const fromReported = db.prepare(`
+  const fromReported = (await sql`
     UPDATE listings
     SET original_price = price - price_delta_reported,
         price_reduction_amount = -price_delta_reported,
@@ -51,29 +50,36 @@ export function rollupPriceHistory(db: BetterSqlite3.Database): { fromHistory: n
     WHERE price_delta_reported IS NOT NULL
       AND price_delta_reported < 0
       AND price_reduction_amount IS NULL
-  `).run().changes;
+  `).count;
 
   // A listing that went back up is no longer a reduction.
-  db.prepare(`
+  await sql`
     UPDATE listings
     SET price_reduction_amount = NULL, price_reduction_pct = NULL, last_price_reduction_date = NULL
     WHERE price_reduction_amount IS NOT NULL AND price_reduction_amount <= 0
-  `).run();
+  `;
 
   return { fromHistory, fromReported };
 }
 
-if (require.main === module) {
-  // Standalone backfills can run against a database that predates these columns.
-  fs.mkdirSync(path.join(process.cwd(), 'data'), { recursive: true });
-  const db = new Database(path.join(process.cwd(), 'data', 'apartments.db'));
-  db.pragma('journal_mode = WAL');
-  applySchema(db);
-  const { fromHistory, fromReported } = rollupPriceHistory(db);
-  const { reduced } = db.prepare(
-    'SELECT COUNT(*) as reduced FROM listings WHERE price_reduction_amount > 0'
-  ).get() as { reduced: number };
-  console.log(`Rolled up ${fromHistory} from price history, ${fromReported} from reported deltas.`);
-  console.log(`${reduced} listings now show a price reduction.`);
-  db.close();
+if (process.argv[1]?.endsWith('rollup-price-history.ts')) {
+  (async () => {
+    loadEnv();
+    const sql = getSql();
+    try {
+      // Standalone backfills can run against a database that predates these columns.
+      await applySchema(sql);
+      const { fromHistory, fromReported } = await rollupPriceHistory(sql);
+      const [{ reduced }] = await sql<{ reduced: number }[]>`
+        SELECT COUNT(*)::int AS reduced FROM listings WHERE price_reduction_amount > 0
+      `;
+      console.log(`Rolled up ${fromHistory} from price history, ${fromReported} from reported deltas.`);
+      console.log(`${reduced} listings now show a price reduction.`);
+    } finally {
+      await closeSql();
+    }
+  })().catch(e => {
+    console.error(e);
+    process.exit(1);
+  });
 }

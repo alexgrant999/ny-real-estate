@@ -1,5 +1,7 @@
 /**
- * Imports active Redfin sale listings for the Catskills towns into SQLite (rentals opt-in).
+ * Imports active Redfin sale listings for the Catskills towns into Postgres (rentals opt-in).
+ *
+ * Runs on a local machine and writes to the database in DATABASE_URL (from .env.local).
  *
  * Redfin serves its search results as JSON to ordinary browsers, keyed by zip code
  * region. No API key is needed. Every town in src/lib/areas.ts carries the Redfin
@@ -26,9 +28,10 @@
  * Behind an HTTP proxy (HTTPS_PROXY set), run with NODE_USE_ENV_PROXY=1 so Node's fetch
  * honours it; by default Node connects directly and ignores the proxy variables.
  */
-import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import type { Sql } from 'postgres';
+import { getSql, closeSql } from '../src/lib/db';
 import { applySchema } from '../src/lib/schema';
 import { TOWNS, regionFor, townNameFor, type Town, type Region } from '../src/lib/areas';
 import { SCRAPER_USER_AGENT } from '../src/lib/config';
@@ -36,6 +39,7 @@ import type { ListingType } from '../src/lib/types';
 import { rollupPriceHistory } from './rollup-price-history';
 import { computeBenchmarks } from './compute-benchmarks';
 import { snapshotMarket } from './snapshot-market';
+import { loadEnv } from './env';
 
 // ─── CLI ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -65,73 +69,114 @@ function getTowns(): Town[] {
 }
 
 // ─── DB ───────────────────────────────────────────────────────────
-const DB_PATH = path.join(process.cwd(), 'data', 'apartments.db');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-applySchema(db);
+loadEnv();
+const sql = getSql();
+fs.mkdirSync(path.join(process.cwd(), 'data'), { recursive: true });
 
-const upsert = db.prepare(`
-  INSERT INTO listings (
-    external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
-    bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
-    listing_status, listing_type, listing_category, days_on_market, listed_date,
-    description, image_url, listing_url, available_at, off_market_at,
-    first_seen_at, imported_at
-  ) VALUES (
-    @external_id, 'redfin', @address, @unit, @neighborhood, @region, @zip_code, @lat, @lng,
-    @bedrooms, @bathrooms, @sqft, @lot_sqft, @year_built, @price, @price_per_sqft, @hoa_fee, NULL,
-    'for_sale', @listing_type, @listing_category, @days_on_market, @listed_date,
-    @description, @image_url, @listing_url, @available_at, NULL,
-    @first_seen_at, @imported_at
-  )
-  ON CONFLICT(external_id) DO UPDATE SET
-    address         = excluded.address,
-    unit            = COALESCE(excluded.unit, listings.unit),
-    neighborhood    = CASE WHEN excluded.neighborhood != 'Unknown' THEN excluded.neighborhood ELSE listings.neighborhood END,
-    region          = excluded.region,
-    zip_code        = CASE WHEN excluded.zip_code != '' THEN excluded.zip_code ELSE listings.zip_code END,
-    lat             = COALESCE(excluded.lat, listings.lat),
-    lng             = COALESCE(excluded.lng, listings.lng),
-    bedrooms        = COALESCE(excluded.bedrooms, listings.bedrooms),
-    bathrooms       = COALESCE(excluded.bathrooms, listings.bathrooms),
-    sqft            = COALESCE(excluded.sqft, listings.sqft),
-    lot_sqft        = COALESCE(excluded.lot_sqft, listings.lot_sqft),
-    year_built      = COALESCE(excluded.year_built, listings.year_built),
-    price           = excluded.price,
-    price_per_sqft  = excluded.price_per_sqft,
-    hoa_fee         = COALESCE(excluded.hoa_fee, listings.hoa_fee),
-    listing_status  = 'for_sale',
-    off_market_at   = NULL,
-    listing_type    = COALESCE(excluded.listing_type, listings.listing_type),
-    days_on_market  = excluded.days_on_market,
-    listed_date     = COALESCE(excluded.listed_date, listings.listed_date),
-    description     = COALESCE(excluded.description, listings.description),
-    image_url       = COALESCE(excluded.image_url, listings.image_url),
-    listing_url     = excluded.listing_url,
-    available_at    = COALESCE(excluded.available_at, listings.available_at),
-    imported_at     = excluded.imported_at
-`);
+interface ExistingRow { id: number; price: number; first_seen_at: string | null }
 
-const getExisting = db.prepare(
-  'SELECT id, price, first_seen_at FROM listings WHERE external_id = ?'
-);
-const insertHistory = db.prepare(`
-  INSERT OR IGNORE INTO price_history (listing_id, price, event_type, event_date)
-  VALUES (@listing_id, @price, @event_type, @event_date)
-`);
-const countHistory = db.prepare('SELECT COUNT(*) as n FROM price_history WHERE listing_id = ?');
-const markDetails = db.prepare('UPDATE listings SET tax_annual = COALESCE(@tax, tax_annual), details_fetched_at = @at WHERE id = @id');
-const dropListedEvents = db.prepare("DELETE FROM price_history WHERE listing_id = ? AND event_type = 'listed'");
+interface UpsertRow {
+  external_id: string;
+  address: string;
+  unit: string | null;
+  neighborhood: string;
+  region: Region;
+  zip_code: string;
+  lat: number | null;
+  lng: number | null;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  sqft: number | null;
+  lot_sqft: number | null;
+  year_built: number | null;
+  price: number;
+  price_per_sqft: number | null;
+  hoa_fee: number | null;
+  listing_type: ListingType;
+  listing_category: 'sale' | 'rental';
+  days_on_market: number;
+  listed_date: string;
+  description: string | null;
+  image_url: string | null;
+  listing_url: string;
+  available_at: string | null;
+  first_seen_at: string;
+  imported_at: string;
+}
+
+async function upsert(q: Sql, r: UpsertRow): Promise<number> {
+  const [{ id }] = await q<{ id: number }[]>`
+    INSERT INTO listings (
+      external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
+      bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
+      listing_status, listing_type, listing_category, days_on_market, listed_date,
+      description, image_url, listing_url, available_at, off_market_at,
+      first_seen_at, imported_at
+    ) VALUES (
+      ${r.external_id}, 'redfin', ${r.address}, ${r.unit}, ${r.neighborhood}, ${r.region}, ${r.zip_code}, ${r.lat}, ${r.lng},
+      ${r.bedrooms}, ${r.bathrooms}, ${r.sqft}, ${r.lot_sqft}, ${r.year_built}, ${r.price}, ${r.price_per_sqft}, ${r.hoa_fee}, NULL,
+      'for_sale', ${r.listing_type}, ${r.listing_category}, ${r.days_on_market}, ${r.listed_date},
+      ${r.description}, ${r.image_url}, ${r.listing_url}, ${r.available_at}, NULL,
+      ${r.first_seen_at}, ${r.imported_at}
+    )
+    ON CONFLICT (external_id) DO UPDATE SET
+      address         = excluded.address,
+      unit            = COALESCE(excluded.unit, listings.unit),
+      neighborhood    = CASE WHEN excluded.neighborhood != 'Unknown' THEN excluded.neighborhood ELSE listings.neighborhood END,
+      region          = excluded.region,
+      zip_code        = CASE WHEN excluded.zip_code != '' THEN excluded.zip_code ELSE listings.zip_code END,
+      lat             = COALESCE(excluded.lat, listings.lat),
+      lng             = COALESCE(excluded.lng, listings.lng),
+      bedrooms        = COALESCE(excluded.bedrooms, listings.bedrooms),
+      bathrooms       = COALESCE(excluded.bathrooms, listings.bathrooms),
+      sqft            = COALESCE(excluded.sqft, listings.sqft),
+      lot_sqft        = COALESCE(excluded.lot_sqft, listings.lot_sqft),
+      year_built      = COALESCE(excluded.year_built, listings.year_built),
+      price           = excluded.price,
+      price_per_sqft  = excluded.price_per_sqft,
+      hoa_fee         = COALESCE(excluded.hoa_fee, listings.hoa_fee),
+      listing_status  = 'for_sale',
+      off_market_at   = NULL,
+      listing_type    = COALESCE(excluded.listing_type, listings.listing_type),
+      days_on_market  = excluded.days_on_market,
+      listed_date     = COALESCE(excluded.listed_date, listings.listed_date),
+      description     = COALESCE(excluded.description, listings.description),
+      image_url       = COALESCE(excluded.image_url, listings.image_url),
+      listing_url     = excluded.listing_url,
+      available_at    = COALESCE(excluded.available_at, listings.available_at),
+      imported_at     = excluded.imported_at
+    RETURNING id
+  `;
+  return id;
+}
+
+/** One round trip for a whole town's batch instead of one lookup per listing. */
+async function getExisting(q: Sql, externalIds: string[]): Promise<Map<string, ExistingRow>> {
+  if (externalIds.length === 0) return new Map();
+  const rows = await q<(ExistingRow & { external_id: string })[]>`
+    SELECT id, external_id, price, first_seen_at FROM listings WHERE external_id IN ${q(externalIds)}
+  `;
+  return new Map(rows.map(r => [r.external_id, { id: r.id, price: r.price, first_seen_at: r.first_seen_at }]));
+}
+
+async function insertHistory(q: Sql, listingId: number, price: number, eventType: string, eventDate: string): Promise<void> {
+  await q`
+    INSERT INTO price_history (listing_id, price, event_type, event_date)
+    VALUES (${listingId}, ${price}, ${eventType}, ${eventDate})
+    ON CONFLICT DO NOTHING
+  `;
+}
+
 // Active Redfin sale listings whose detail payload has never been fetched: new ones first,
 // then anything a previous run skipped because of --details-limit.
-const detailCandidates = db.prepare(`
-  SELECT id, external_id, price, listed_date FROM listings
-  WHERE source = 'redfin' AND listing_category = 'sale' AND listing_status = 'for_sale'
-    AND details_fetched_at IS NULL
-  ORDER BY first_seen_at DESC, id DESC
-`);
+async function detailCandidates(): Promise<{ id: number; external_id: string; price: number; listed_date: string | null }[]> {
+  return sql<{ id: number; external_id: string; price: number; listed_date: string | null }[]>`
+    SELECT id, external_id, price, listed_date FROM listings
+    WHERE source = 'redfin' AND listing_category = 'sale' AND listing_status = 'for_sale'
+      AND details_fetched_at IS NULL
+    ORDER BY first_seen_at DESC NULLS LAST, id DESC
+  `;
+}
 
 // ─── HTTP ─────────────────────────────────────────────────────────
 const BASE = 'https://www.redfin.com';
@@ -180,6 +225,11 @@ const num = (x: unknown): number | null => {
   const v = val<unknown>(x);
   const n = Number(v);
   return v === null || v === '' || Number.isNaN(n) ? null : n;
+};
+// Postgres rejects fractional values for INTEGER columns (SQLite stored them as REAL).
+const int = (x: unknown): number | null => {
+  const n = num(x);
+  return n === null ? null : Math.round(n);
 };
 const str = (x: unknown): string | null => {
   const v = val<unknown>(x);
@@ -248,7 +298,7 @@ function photoUrl(dataSourceId: unknown, mlsId: unknown): string | null {
 
 function parseSaleHome(h: Dict): Scraped | null {
   const propertyId = str(h.propertyId);
-  const price = num(h.price);
+  const price = int(h.price);
   let address = str(h.streetLine);
   if (!propertyId || !price || !address) return null;
   // streetLine usually already carries the unit; keep it out of the unit column.
@@ -269,16 +319,16 @@ function parseSaleHome(h: Dict): Scraped | null {
     zip: str(h.zip) ?? str(h.postalCode) ?? '',
     lat: latLong?.latitude ?? null,
     lng: latLong?.longitude ?? null,
-    bedrooms: num(h.beds),
+    bedrooms: int(h.beds),
     bathrooms: num(h.baths),
-    sqft: num(h.sqFt),
-    lot_sqft: num(h.lotSize),
-    year_built: num(h.yearBuilt),
+    sqft: int(h.sqFt),
+    lot_sqft: int(h.lotSize),
+    year_built: int(h.yearBuilt),
     price,
-    hoa_fee: num(h.hoa),
+    hoa_fee: int(h.hoa),
     listing_type: saleType(num(h.uiPropertyType), num(h.propertyType)),
     listing_category: 'sale',
-    dom: num(h.dom),
+    dom: int(h.dom),
     description: str(h.listingRemarks),
     image_url: photoUrl(h.dataSourceId, h.mlsId),
     listing_url: urlPath.startsWith('http') ? urlPath : `${BASE}${urlPath}`,
@@ -294,7 +344,7 @@ function parseRentalHome(h: Dict): Scraped | null {
   const addr = (home.addressInfo ?? {}) as Dict;
   const propertyId = str(home.propertyId);
   const rentalId = str(ext.rentalId) ?? propertyId;
-  const price = num((ext.rentPriceRange as Dict | undefined)?.min);
+  const price = int((ext.rentPriceRange as Dict | undefined)?.min);
   let address = str(addr.formattedStreetLine) ?? '';
   if (!rentalId || !price || !address) return null;
 
@@ -305,7 +355,7 @@ function parseRentalHome(h: Dict): Scraped | null {
 
   const centroid = ((addr.centroid as Dict | undefined)?.centroid ?? {}) as Dict;
   const urlPath = str(home.url) ?? '';
-  const bedMin = num((ext.bedRange as Dict | undefined)?.min);
+  const bedMin = int((ext.bedRange as Dict | undefined)?.min);
   return {
     external_id: `rf-rent-${rentalId}`,
     address,
@@ -316,7 +366,7 @@ function parseRentalHome(h: Dict): Scraped | null {
     lng: num(centroid.longitude),
     bedrooms: bedMin,
     bathrooms: num((ext.bathRange as Dict | undefined)?.min),
-    sqft: num((ext.sqftRange as Dict | undefined)?.min),
+    sqft: int((ext.sqftRange as Dict | undefined)?.min),
     lot_sqft: null,
     year_built: null,
     price,
@@ -399,9 +449,10 @@ function currentCycle(events: HistoryEvent[]): { type: 'listed' | 'reduced' | 'i
 
 // ─── Main ─────────────────────────────────────────────────────────
 async function main() {
-  const logId = externalLogId ?? Number(db.prepare(
-    `INSERT INTO import_logs (source, status) VALUES ('redfin', 'running')`
-  ).run().lastInsertRowid);
+  await applySchema(sql);
+  const logId = externalLogId ?? (await sql<{ id: number }[]>`
+    INSERT INTO import_logs (source, status) VALUES ('redfin', 'running') RETURNING id
+  `)[0].id;
 
   const today = new Date().toISOString().slice(0, 10);
   const now = new Date().toISOString();
@@ -436,10 +487,15 @@ async function main() {
       console.log(`${listings.length} listings`);
       scrapedZips[category].add(town.zip);
 
-      const apply = db.transaction(() => {
+      // Counters only move once the town's transaction commits.
+      const counts = await sql.begin(async tx => {
+        // TransactionSql loses the tagged-template call signature in postgres.js's types.
+        const q = tx as unknown as Sql;
+        const c = { added: 0, updated: 0, priceChanges: 0, newSales: [] as typeof newSales };
+        const existingRows = await getExisting(q, [...new Set(listings.map(l => l.external_id))]);
         for (const l of listings) {
           seen[category].add(l.external_id);
-          const existing = getExisting.get(l.external_id) as { id: number; price: number; first_seen_at: string | null } | undefined;
+          const existing = existingRows.get(l.external_id);
           const firstSeenAt = existing?.first_seen_at ?? today;
           const dom = l.dom ?? Math.round((Date.now() - new Date(firstSeenAt).getTime()) / 86_400_000);
           const listedDate = l.dom !== null
@@ -447,7 +503,7 @@ async function main() {
             : firstSeenAt;
           const region: Region = regionFor(l.zip, l.city) ?? town.region;
 
-          upsert.run({
+          const id = await upsert(q, {
             external_id: l.external_id,
             address: l.address,
             unit: l.unit,
@@ -476,25 +532,32 @@ async function main() {
             imported_at: now,
           });
 
-          const row = getExisting.get(l.external_id) as { id: number; price: number; first_seen_at: string | null };
           if (!existing) {
-            added++;
+            c.added++;
             if (category === 'sale' && l.propertyId) {
-              newSales.push({ id: row.id, propertyId: l.propertyId, listingId: l.listingId, price: l.price, listedDate });
+              c.newSales.push({ id, propertyId: l.propertyId, listingId: l.listingId, price: l.price, listedDate });
             } else {
-              insertHistory.run({ listing_id: row.id, price: l.price, event_type: 'listed', event_date: listedDate });
+              await insertHistory(q, id, l.price, 'listed', listedDate);
             }
+            // Redfin can return the same home twice in one town's results; the second copy
+            // is an update of the row just inserted, as it was with per-row lookups.
+            existingRows.set(l.external_id, { id, price: l.price, first_seen_at: firstSeenAt });
           } else {
-            updated++;
+            c.updated++;
             if (l.price !== existing.price) {
               const eventType = l.price < existing.price ? 'reduced' : 'increased';
-              insertHistory.run({ listing_id: row.id, price: l.price, event_type: eventType, event_date: today });
-              priceChanges++;
+              await insertHistory(q, id, l.price, eventType, today);
+              c.priceChanges++;
             }
+            existingRows.set(l.external_id, { ...existing, price: l.price });
           }
         }
+        return c;
       });
-      apply();
+      added += counts.added;
+      updated += counts.updated;
+      priceChanges += counts.priceChanges;
+      newSales.push(...counts.newSales);
       await sleep(REQUEST_GAP_MS);
     }
   }
@@ -503,10 +566,10 @@ async function main() {
   // Every new sale listing gets a "listed" event right away so the chart has a start;
   // the detail fetch then replaces it with the MLS history when it gets to that listing.
   for (const n of newSales) {
-    insertHistory.run({ listing_id: n.id, price: n.price, event_type: 'listed', event_date: n.listedDate ?? today });
+    await insertHistory(sql, n.id, n.price, 'listed', n.listedDate ?? today);
   }
   const listingIds = new Map(newSales.map(n => [n.id, n.listingId]));
-  const candidates = noDetails ? [] : (detailCandidates.all() as { id: number; external_id: string; price: number; listed_date: string | null }[]);
+  const candidates = noDetails ? [] : await detailCandidates();
   const batch = candidates.slice(0, detailsLimit);
   if (batch.length) {
     console.log(`\n── Price history + taxes for ${batch.length} of ${candidates.length} listings without details ──`);
@@ -516,13 +579,21 @@ async function main() {
       try {
         const { events, tax } = await fetchDetails(propertyId, listingIds.get(c.id) ?? null);
         const cycle = currentCycle(events);
-        db.transaction(() => {
-          if (cycle.some(ev => ev.type === 'listed')) dropListedEvents.run(c.id);
-          for (const ev of cycle) insertHistory.run({ listing_id: c.id, price: ev.price, event_type: ev.type, event_date: ev.date });
-          const { n: have } = countHistory.get(c.id) as { n: number };
-          if (have === 0) insertHistory.run({ listing_id: c.id, price: c.price, event_type: 'listed', event_date: c.listed_date ?? today });
-          markDetails.run({ tax, at: now, id: c.id });
-        })();
+        await sql.begin(async tx => {
+          const q = tx as unknown as Sql;
+          if (cycle.some(ev => ev.type === 'listed')) {
+            await q`DELETE FROM price_history WHERE listing_id = ${c.id} AND event_type = 'listed'`;
+          }
+          for (const ev of cycle) await insertHistory(q, c.id, ev.price, ev.type, ev.date);
+          const [{ n: have }] = await q<{ n: number }[]>`
+            SELECT COUNT(*)::int AS n FROM price_history WHERE listing_id = ${c.id}
+          `;
+          if (have === 0) await insertHistory(q, c.id, c.price, 'listed', c.listed_date ?? today);
+          await q`
+            UPDATE listings SET tax_annual = COALESCE(${tax}::int, tax_annual), details_fetched_at = ${now}
+            WHERE id = ${c.id}
+          `;
+        });
         console.log(`${cycle.length} events${tax ? `, tax $${tax.toLocaleString()}` : ''}`);
       } catch (e) {
         console.log(`FAILED: ${(e as Error).message}`);
@@ -539,41 +610,49 @@ async function main() {
   for (const category of categories) {
     const zips = [...scrapedZips[category]];
     if (zips.length === 0) continue;
-    const rows = db.prepare(`
+    const rows = await sql<{ id: number; external_id: string }[]>`
       SELECT id, external_id FROM listings
-      WHERE source = 'redfin' AND listing_category = ? AND listing_status = 'for_sale'
-        AND zip_code IN (${zips.map(() => '?').join(',')})
-    `).all(category, ...zips) as { id: number; external_id: string }[];
+      WHERE source = 'redfin' AND listing_category = ${category} AND listing_status = 'for_sale'
+        AND zip_code IN ${sql(zips)}
+    `;
     const gone = rows.filter(r => !seen[category].has(r.external_id));
-    const mark = db.prepare(`UPDATE listings SET listing_status = 'off_market', off_market_at = ? WHERE id = ?`);
-    db.transaction(() => { for (const g of gone) mark.run(today, g.id); })();
+    if (gone.length) {
+      await sql`
+        UPDATE listings SET listing_status = 'off_market', off_market_at = ${today}
+        WHERE id IN ${sql(gone.map(g => g.id))}
+      `;
+    }
     offMarket += gone.length;
   }
 
   // ── Derived data ───────────────────────────────────────────────
-  const { fromHistory, fromReported } = rollupPriceHistory(db);
-  const benchmarks = computeBenchmarks(db);
-  const snapshotRows = snapshotMarket(db);
+  const { fromHistory, fromReported } = await rollupPriceHistory(sql);
+  const benchmarks = await computeBenchmarks(sql);
+  const snapshotRows = await snapshotMarket(sql);
 
-  db.prepare(
-    `UPDATE import_logs SET status = 'success', listings_added = ?, listings_updated = ?, completed_at = datetime('now') WHERE id = ?`
-  ).run(added, updated, logId);
+  await sql`
+    UPDATE import_logs SET status = 'success', listings_added = ${added}, listings_updated = ${updated}, completed_at = now()::text
+    WHERE id = ${logId}
+  `;
 
   console.log(`\nPrice changes this run: ${priceChanges} · rolled up ${fromHistory} from history, ${fromReported} from reported deltas`);
   console.log(`Off market: ${offMarket} · benchmarks: ${benchmarks} towns · market snapshot: ${snapshotRows} rows`);
-  console.log(`✓ Import complete — ${added} new, ${updated} updated`);
-  db.close();
+  console.log(`✓ Import complete: ${added} new, ${updated} updated`);
 }
 
-main().catch(e => {
-  console.error('Fatal:', (e as Error).message);
-  try {
+main()
+  .catch(async e => {
+    console.error('Fatal:', (e as Error).message);
+    process.exitCode = 1;
     if (externalLogId) {
-      db.prepare(`UPDATE import_logs SET status = 'error', error_message = ?, completed_at = datetime('now') WHERE id = ?`)
-        .run((e as Error).message, externalLogId);
+      try {
+        await sql`
+          UPDATE import_logs SET status = 'error', error_message = ${(e as Error).message}, completed_at = now()::text
+          WHERE id = ${externalLogId}
+        `;
+      } catch (logError) {
+        console.error('Could not record the failure in import_logs:', (logError as Error).message);
+      }
     }
-  } finally {
-    db.close();
-  }
-  process.exit(1);
-});
+  })
+  .finally(() => closeSql());

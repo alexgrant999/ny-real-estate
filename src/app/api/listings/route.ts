@@ -33,9 +33,11 @@ export async function GET(req: NextRequest) {
     noPriceCap: sp.get('noPriceCap') === 'true',
   };
 
-  const { listings, total } = getListings(filters);
-  const towns = getDistinctTowns();
-  const stats = getListingStats();
+  const [{ listings, total }, towns, stats] = await Promise.all([
+    getListings(filters),
+    getDistinctTowns(),
+    getListingStats(),
+  ]);
 
   return NextResponse.json({ listings, total, towns, stats });
 }

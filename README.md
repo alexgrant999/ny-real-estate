@@ -5,7 +5,7 @@ Catskills. Imports active listings from Redfin (no API key), tracks price histor
 imports, surfaces deals with preset queries, compares listings side by side, plots them on a
 map, and charts market trends built from its own monthly snapshots.
 
-Forked from the NYC apartment finder; same stack (Next.js 14, TypeScript, Tailwind, SQLite),
+Forked from the NYC apartment finder; same stack (Next.js 14, TypeScript, Tailwind, Postgres on Neon),
 different geography and data source.
 
 ## Quick start
@@ -48,7 +48,7 @@ Round Top, Ashland, Prattsville, Cairo, Catskill) are configured but off by defa
 | `npm run rollup` | Fold price history into the reduction columns |
 | `npm run geocode` | Fill missing coordinates via the US Census geocoder |
 | `npm run import zillow` | Optional secondary source, needs `RAPIDAPI_KEY` |
-| `npm run deploy` | Fold the SQLite file for a read-only deploy, then `vercel --prod` |
+| `npm run deploy` | `vercel --prod` |
 
 ## How the Redfin import works
 

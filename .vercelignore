@@ -2,10 +2,6 @@
 node_modules
 .next
 
-# data/apartments.db is deliberately NOT ignored. The app reads it at runtime from
-# the deployment bundle, and .gitignore excludes /data, so without this file the
-# CLI would drop the database and every route would 500 on the missing directory.
-data/*.log
-data/*.db-wal
-data/*.db-shm
-data/debug-*.html
+# The app reads Postgres (DATABASE_URL), not a local file. data/ only holds the old
+# SQLite database, import logs and debug dumps, none of which belong in a deployment.
+data

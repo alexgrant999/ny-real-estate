@@ -1,9 +1,9 @@
 /**
- * Seeds data/apartments.db with fake Catskills listings so the app can be explored
+ * Seeds the Postgres database (DATABASE_URL) with fake Catskills listings so the app can be explored
  * without touching Redfin.
  *
- * For every active town in src/lib/areas.ts: 6–12 sale listings (houses, land,
- * multi-family, condos and townhouses, manufactured homes) and 2–5 rentals, with
+ * For every active town in src/lib/areas.ts: 6 to 12 sale listings (houses, land,
+ * multi-family, condos and townhouses, manufactured homes) and 2 to 5 rentals, with
  * Catskills street names, lots in acres, years built, taxes, and price cuts backed by
  * price_history rows. Then town benchmarks, this month's market snapshot, and eleven
  * synthesised months behind it so the Market page has lines to draw.
@@ -16,15 +16,15 @@
  *   npx tsx scripts/seed-demo.ts --seed 7        # a different set of listings
  *   npx tsx scripts/seed-demo.ts --log-id 12     # finalise an existing import_logs row
  */
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import type { Sql } from 'postgres';
+import { getSql, closeSql } from '../src/lib/db';
 import { applySchema } from '../src/lib/schema';
 import { TOWNS, REGIONS, type Town, type Region } from '../src/lib/areas';
 import { acresToSqft } from '../src/lib/utils';
 import type { ListingType } from '../src/lib/types';
 import { computeBenchmarks } from './compute-benchmarks';
-import { snapshotMarket, currentPeriod } from './snapshot-market';
+import { snapshotMarket, currentPeriod, upsertTrends, type TrendRow } from './snapshot-market';
+import { loadEnv } from './env';
 
 // ─── CLI ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -33,12 +33,8 @@ const seed = parseInt(opt('--seed') ?? '20260101');
 const externalLogId = opt('--log-id') ? parseInt(opt('--log-id')!) : null;
 
 // ─── DB ───────────────────────────────────────────────────────────
-const DB_PATH = path.join(process.cwd(), 'data', 'apartments.db');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-applySchema(db);
+loadEnv();
+const sql = getSql();
 
 // ─── Random (seeded) ──────────────────────────────────────────────
 function mulberry32(a: number): () => number {
@@ -361,54 +357,29 @@ function monthsBefore(period: string, n: number): string {
 }
 
 /** Random-walk this month's snapshot back eleven months so every area has a 12-point series. */
-function backfillTrends(period: string): number {
-  const rows = db.prepare(`
-    SELECT area_name, region, area_type, metric, value FROM market_trends WHERE period = ?
-  `).all(period) as { area_name: string; region: string; area_type: string; metric: string; value: number }[];
-  const insert = db.prepare(`
-    INSERT OR REPLACE INTO market_trends (area_name, region, area_type, metric, period, value)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-  let written = 0;
-  db.transaction(() => {
-    for (const r of rows) {
-      const swing = INVENTORY_METRICS.has(r.metric) ? 0.15 : 0.04;
-      let v = r.value;
-      for (let back = 1; back <= 11; back++) {
-        v = shapeValue(r.metric, v * (1 + randFloat(-swing, swing)));
-        insert.run(r.area_name, r.region, r.area_type, r.metric, monthsBefore(period, back), v);
-        written++;
-      }
+async function backfillTrends(period: string): Promise<number> {
+  const rows = await sql<{ area_name: string; region: string; area_type: string; metric: string; value: number }[]>`
+    SELECT area_name, region, area_type, metric, value FROM market_trends WHERE period = ${period}
+  `;
+  const out: TrendRow[] = [];
+  for (const r of rows) {
+    const swing = INVENTORY_METRICS.has(r.metric) ? 0.15 : 0.04;
+    let v = r.value;
+    for (let back = 1; back <= 11; back++) {
+      v = shapeValue(r.metric, v * (1 + randFloat(-swing, swing)));
+      out.push({ area_name: r.area_name, region: r.region, area_type: r.area_type, metric: r.metric, period: monthsBefore(period, back), value: v });
     }
-  })();
-  return written;
+  }
+  await sql.begin(async tx => {
+    // TransactionSql loses the tagged-template call signature in postgres.js's types.
+    await upsertTrends(tx as unknown as Sql, out);
+  });
+  return out.length;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────
-const upsert = db.prepare(`
-  INSERT OR REPLACE INTO listings (
-    external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
-    bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
-    listing_status, listing_type, listing_category, days_on_market, listed_date,
-    last_price_reduction_date, original_price, price_reduction_amount, price_reduction_pct,
-    description, image_url, listing_url, available_at, off_market_at, price_delta_reported,
-    first_seen_at, imported_at
-  ) VALUES (
-    @external_id, 'demo', @address, @unit, @neighborhood, @region, @zip_code, @lat, @lng,
-    @bedrooms, @bathrooms, @sqft, @lot_sqft, @year_built, @price, @price_per_sqft, @hoa_fee, @tax_annual,
-    'for_sale', @listing_type, @listing_category, @days_on_market, @listed_date,
-    @last_price_reduction_date, @original_price, @price_reduction_amount, @price_reduction_pct,
-    @description, NULL, NULL, @available_at, NULL, NULL,
-    @first_seen_at, @imported_at
-  )
-`);
-const getId = db.prepare('SELECT id FROM listings WHERE external_id = ?');
-const insertHistory = db.prepare(`
-  INSERT OR IGNORE INTO price_history (listing_id, price, event_type, event_date)
-  VALUES (?, ?, ?, ?)
-`);
-
-function main() {
+async function main() {
+  await applySchema(sql);
   const towns = TOWNS.filter(t => t.active);
   const now = new Date().toISOString();
   const listings: DemoListing[] = [];
@@ -421,66 +392,91 @@ function main() {
   }
   for (const l of listings) applyPriceHistory(l);
 
-  let historyRows = 0;
-  db.transaction(() => {
-    for (const l of listings) {
-      upsert.run({
-        external_id: l.external_id,
-        address: l.address,
-        unit: l.unit,
-        neighborhood: l.neighborhood,
-        region: l.region,
-        zip_code: l.zip_code,
-        lat: l.lat,
-        lng: l.lng,
-        bedrooms: l.bedrooms,
-        bathrooms: l.bathrooms,
-        sqft: l.sqft,
-        lot_sqft: l.lot_sqft,
-        year_built: l.year_built,
-        price: l.price,
-        price_per_sqft: l.price_per_sqft,
-        hoa_fee: l.hoa_fee,
-        tax_annual: l.tax_annual,
-        listing_type: l.listing_type,
-        listing_category: l.listing_category,
-        days_on_market: l.days_on_market,
-        listed_date: l.listed_date,
-        last_price_reduction_date: l.last_price_reduction_date,
-        original_price: l.original_price,
-        price_reduction_amount: l.price_reduction_amount,
-        price_reduction_pct: l.price_reduction_pct,
-        description: l.description,
-        available_at: l.available_at,
-        first_seen_at: l.first_seen_at,
-        imported_at: now,
-      });
-      const { id } = getId.get(l.external_id) as { id: number };
-      for (const h of l.history) {
-        historyRows += insertHistory.run(id, h.price, h.event_type, h.event_date).changes;
-      }
-    }
-  })();
+  const rows = listings.map(l => ({
+    external_id: l.external_id,
+    source: 'demo',
+    address: l.address,
+    unit: l.unit,
+    neighborhood: l.neighborhood,
+    region: l.region,
+    zip_code: l.zip_code,
+    lat: l.lat,
+    lng: l.lng,
+    bedrooms: l.bedrooms,
+    bathrooms: l.bathrooms,
+    sqft: l.sqft,
+    lot_sqft: l.lot_sqft,
+    year_built: l.year_built,
+    price: l.price,
+    price_per_sqft: l.price_per_sqft,
+    hoa_fee: l.hoa_fee,
+    tax_annual: l.tax_annual,
+    listing_status: 'for_sale',
+    listing_type: l.listing_type,
+    listing_category: l.listing_category,
+    days_on_market: l.days_on_market,
+    listed_date: l.listed_date,
+    last_price_reduction_date: l.last_price_reduction_date,
+    original_price: l.original_price,
+    price_reduction_amount: l.price_reduction_amount,
+    price_reduction_pct: l.price_reduction_pct,
+    description: l.description,
+    image_url: null,
+    listing_url: null,
+    available_at: l.available_at,
+    off_market_at: null,
+    price_delta_reported: null,
+    first_seen_at: l.first_seen_at,
+    imported_at: now,
+  }));
 
-  const benchmarks = computeBenchmarks(db);
+  const historyRows = await sql.begin(async tx => {
+    // TransactionSql loses the tagged-template call signature in postgres.js's types.
+    const q = tx as unknown as Sql;
+    // INSERT OR REPLACE semantics: the old row (and its price history) goes, a fresh one
+    // with a new id takes its place, so a re-run never mixes old and new history.
+    const ids = rows.map(r => r.external_id);
+    await q`DELETE FROM price_history WHERE listing_id IN (SELECT id FROM listings WHERE external_id IN ${q(ids)})`;
+    await q`DELETE FROM listings WHERE external_id IN ${q(ids)}`;
+    const inserted = await q<{ id: number; external_id: string }[]>`
+      INSERT INTO listings ${q(rows)} RETURNING id, external_id
+    `;
+    const idFor = new Map(inserted.map(r => [r.external_id, r.id]));
+
+    const history = listings.flatMap(l => l.history.map(h => ({
+      listing_id: idFor.get(l.external_id)!,
+      price: h.price,
+      event_type: h.event_type,
+      event_date: h.event_date,
+    })));
+    let written = 0;
+    for (let i = 0; i < history.length; i += 1000) {
+      written += (await q`
+        INSERT INTO price_history ${q(history.slice(i, i + 1000))} ON CONFLICT DO NOTHING
+      `).count;
+    }
+    return written;
+  });
+
+  const benchmarks = await computeBenchmarks(sql);
   const period = currentPeriod();
-  const snapshotRows = snapshotMarket(db, period);
-  const backfilledRows = backfillTrends(period);
+  const snapshotRows = await snapshotMarket(sql, period);
+  const backfilledRows = await backfillTrends(period);
 
   const saleCount = listings.filter(l => l.listing_category === 'sale').length;
   const rentalCount = listings.length - saleCount;
   const reducedCount = listings.filter(l => (l.price_reduction_amount ?? 0) > 0).length;
 
   if (externalLogId) {
-    db.prepare(`
-      UPDATE import_logs SET status = 'success', listings_added = ?, listings_updated = 0, completed_at = datetime('now')
-      WHERE id = ?
-    `).run(listings.length, externalLogId);
+    await sql`
+      UPDATE import_logs SET status = 'success', listings_added = ${listings.length}, listings_updated = 0, completed_at = now()::text
+      WHERE id = ${externalLogId}
+    `;
   } else {
-    db.prepare(`
+    await sql`
       INSERT INTO import_logs (source, status, listings_added, listings_updated, completed_at)
-      VALUES ('demo', 'success', ?, 0, datetime('now'))
-    `).run(listings.length);
+      VALUES ('demo', 'success', ${listings.length}, 0, now()::text)
+    `;
   }
 
   console.log(`Seeded ${listings.length} demo listings across ${towns.length} towns (${TODAY})`);
@@ -497,15 +493,15 @@ function main() {
   console.log('✓ Demo seed complete');
 }
 
-try {
-  main();
-} catch (e) {
-  console.error('Fatal:', (e as Error).message);
-  if (externalLogId) {
-    db.prepare(`UPDATE import_logs SET status = 'error', error_message = ?, completed_at = datetime('now') WHERE id = ?`)
-      .run((e as Error).message, externalLogId);
-  }
-  db.close();
-  process.exit(1);
-}
-db.close();
+main()
+  .catch(async e => {
+    console.error('Fatal:', (e as Error).message);
+    process.exitCode = 1;
+    if (externalLogId) {
+      await sql`
+        UPDATE import_logs SET status = 'error', error_message = ${(e as Error).message}, completed_at = now()::text
+        WHERE id = ${externalLogId}
+      `.catch(() => undefined);
+    }
+  })
+  .finally(() => closeSql());

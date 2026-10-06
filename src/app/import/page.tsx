@@ -5,6 +5,12 @@ import { REGIONS, REGION_LABELS, TOWNS, TOWNS_BY_REGION } from '@/lib/areas';
 
 type TestResult = { ok: boolean; message: string };
 
+// started_at is TEXT: SQLite style UTC ('2026-10-05 12:34:56') or Postgres now()::text ('2026-10-05 12:34:56.789+00').
+function parseStartedAt(value: string): Date {
+  const iso = value.replace(' ', 'T').replace(/([+-]\d\d)$/, '$1:00');
+  return new Date(/(Z|[+-]\d\d:\d\d)$/.test(iso) ? iso : `${iso}Z`);
+}
+
 export default function ImportPage() {
   const [logs, setLogs] = useState<ImportLog[]>([]);
   const [loading, setLoading] = useState<string | null>(null);
@@ -15,6 +21,8 @@ export default function ImportPage() {
   // Connection test
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  const [importError, setImportError] = useState<{ source: 'redfin' | 'demo'; message: string } | null>(null);
 
   // Live log
   const [activeLogId, setActiveLogId] = useState<number | null>(null);
@@ -89,6 +97,7 @@ export default function ImportPage() {
     setLogLines([]);
     setLogDone(false);
     setActiveLogId(null);
+    setImportError(null);
     try {
       const res = await fetch('/api/import', {
         method: 'POST',
@@ -100,7 +109,10 @@ export default function ImportPage() {
         ),
       });
       const data = await res.json();
-      if (data.logId) {
+      if (!res.ok && typeof data.error === 'string') {
+        setImportError({ source, message: data.error });
+        setLoading(null);
+      } else if (data.logId) {
         setActiveLogId(data.logId);
       } else {
         setLoading(null);
@@ -133,6 +145,11 @@ export default function ImportPage() {
             {testResult && (
               <p className={`mt-2 text-xs ${testResult.ok ? 'text-green-600' : 'text-red-600'}`}>
                 {testResult.message}
+              </p>
+            )}
+            {importError?.source === 'redfin' && (
+              <p className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {importError.message}
               </p>
             )}
           </div>
@@ -243,6 +260,11 @@ export default function ImportPage() {
             <p className="text-sm text-gray-500 mt-1">
               Generate ~300 fake Catskills listings for testing filters and charts.
             </p>
+            {importError?.source === 'demo' && (
+              <p className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {importError.message}
+              </p>
+            )}
           </div>
           <button
             onClick={() => runImport('demo')}
@@ -291,7 +313,7 @@ export default function ImportPage() {
                   <td className="px-4 py-2.5 text-right text-gray-700">{log.listings_updated}</td>
                   <td className="px-4 py-2.5 text-gray-500 text-xs">
                     {log.started_at
-                      ? new Date(log.started_at + 'Z').toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+                      ? parseStartedAt(log.started_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
                       : ''}
                   </td>
                   <td className="px-4 py-2.5 text-red-500 text-xs max-w-xs truncate">{log.error_message ?? ''}</td>

@@ -9,10 +9,10 @@ export async function GET(req: NextRequest) {
 
   if (!preset) {
     // Return counts for all presets
-    const counts = getDealCounts();
+    const counts = await getDealCounts();
     return NextResponse.json(counts);
   }
 
-  const listings = getDealListings(preset);
+  const listings = await getDealListings(preset);
   return NextResponse.json({ listings, preset });
 }

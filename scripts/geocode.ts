@@ -10,17 +10,12 @@
  *   npx tsx scripts/geocode.ts              # geocode all missing
  *   npx tsx scripts/geocode.ts --limit 100  # geocode up to 100
  */
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { getSql, closeSql } from '../src/lib/db';
 import { applySchema } from '../src/lib/schema';
+import { loadEnv } from './env';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'apartments.db');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-applySchema(db);
+loadEnv();
+const sql = getSql();
 
 const args = process.argv.slice(2);
 const limit = parseInt(args[args.indexOf('--limit') + 1] || '2000');
@@ -47,8 +42,6 @@ async function geocode(address: string, town: string, zip: string): Promise<{ la
   }
 }
 
-const update = db.prepare('UPDATE listings SET lat = @lat, lng = @lng WHERE id = @id');
-
 interface Row {
   id: number;
   address: string;
@@ -59,12 +52,13 @@ interface Row {
 }
 
 async function main() {
-  const rows = db.prepare(`
+  await applySchema(sql);
+  const rows = await sql<Row[]>`
     SELECT id, address, unit, region, neighborhood, zip_code FROM listings
     WHERE lat IS NULL
     ORDER BY id
-    LIMIT ?
-  `).all(limit) as Row[];
+    LIMIT ${limit}
+  `;
 
   console.log(`Geocoding ${rows.length} listings...\n`);
 
@@ -76,7 +70,7 @@ async function main() {
 
     const result = await geocode(row.address, row.neighborhood, row.zip_code);
     if (result) {
-      update.run({ lat: result.lat, lng: result.lng, id: row.id });
+      await sql`UPDATE listings SET lat = ${result.lat}, lng = ${result.lng} WHERE id = ${row.id}`;
       process.stdout.write(`${result.lat.toFixed(4)}, ${result.lng.toFixed(4)}`);
       success++;
     } else {
@@ -89,7 +83,8 @@ async function main() {
   }
 
   console.log(`\n✓ Geocoded ${success} listings, ${failed} not found`);
-  db.close();
 }
 
-main().catch(e => { console.error(e); db.close(); });
+main()
+  .catch(e => { console.error(e); process.exitCode = 1; })
+  .finally(() => closeSql());

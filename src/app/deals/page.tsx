@@ -9,7 +9,7 @@ const PRESETS: { id: DealPreset; title: string; description: string; color: stri
   {
     id: 'price_reduced_7d',
     title: 'Reduced This Week',
-    description: 'Price cut in the last 7 days — sellers are motivated',
+    description: 'Price cut in the last 7 days, sellers are motivated',
     color: 'bg-red-50 border-red-200 text-red-700',
   },
   {
@@ -27,13 +27,13 @@ const PRESETS: { id: DealPreset; title: string; description: string; color: stri
   {
     id: 'dom_over_60',
     title: 'Sitting 60+ Days',
-    description: 'On the market over 2 months — room to negotiate',
+    description: 'On the market over 2 months, room to negotiate',
     color: 'bg-yellow-50 border-yellow-200 text-yellow-800',
   },
   {
     id: 'dom_over_90',
     title: 'Sitting 90+ Days',
-    description: 'On the market over 3 months — strongly motivated sellers',
+    description: 'On the market over 3 months, strongly motivated sellers',
     color: 'bg-orange-50 border-orange-200 text-orange-800',
   },
   {
@@ -50,8 +50,10 @@ interface PageProps {
 
 export default async function DealsPage({ searchParams }: PageProps) {
   const activePreset = searchParams.preset ?? 'price_reduced_7d';
-  const counts = getDealCounts();
-  const listings = getDealListings(activePreset);
+  const [counts, listings] = await Promise.all([
+    getDealCounts(),
+    getDealListings(activePreset),
+  ]);
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 py-6">

@@ -18,7 +18,7 @@ Treat the output as additional context for the session (the brain client lives i
 
 - **Framework**: Next.js 14.2 (App Router) + TypeScript strict
 - **Styling**: Tailwind CSS v3.4 — utilities only, no component libraries
-- **Database**: SQLite via `better-sqlite3` (local file: `data/apartments.db`)
+- **Database**: Postgres (Neon) via the `postgres` npm package, `DATABASE_URL` in `.env.local`
 - **Charts**: Recharts 3 · **Map**: Leaflet 1.9 (client-only)
 - **No ORM** — direct SQL with prepared statements
 - **Scripts**: `tsx` for running TypeScript scripts outside Next.js
@@ -68,7 +68,7 @@ src/
   lib/
     areas.ts                    # Regions, towns, Redfin ids (see above)
     config.ts                   # App name, price caps, map centre, UA
-    db.ts                       # Singleton SQLite connection (WAL, FK on; read-only on Vercel)
+    db.ts                       # Singleton postgres.js client (getSql/closeSql, UTC, prepare off)
     schema.ts                   # SCHEMA_SQL + applySchema(db) + runMigrations()
     types.ts                    # Listing, ListingFilters, ListingType, DealPreset, ...
     utils.ts                    # formatPrice, lotLabel (acres), domColor, redfinSearchUrl, zillowSearchUrl
@@ -85,11 +85,10 @@ scripts/
   snapshot-market.ts            # Monthly metrics per town/region/all → market_trends
   rollup-price-history.ts       # price_history → original_price / reduction columns
   geocode.ts                    # Census geocoder for rows missing lat/lng
-  predeploy-db.ts               # Folds WAL into a single read-only file for Vercel
   importers/zillow.ts           # Optional RapidAPI source (needs RAPIDAPI_KEY)
 
 data/
-  apartments.db                 # SQLite database file (gitignored)
+  migrate-sqlite-to-pg.ts       # One-off copy of the old SQLite file into Postgres
   import-<id>.log               # Per-run import logs read by the Import page
 ```
 
@@ -109,7 +108,7 @@ All API routes use `export const dynamic = 'force-dynamic'`.
 
 ## Database Schema
 
-SQLite, WAL mode, foreign keys on. DDL lives in `SCHEMA_SQL` (`src/lib/schema.ts`); every script calls `applySchema(db)` on its own connection so nothing depends on the app having started.
+Postgres on Neon. DDL lives in `SCHEMA_SQL` (`src/lib/schema.ts`); every script calls `applySchema(sql)` on startup so nothing depends on the app having started. All date columns are TEXT holding ISO-ish strings; `import_logs` timestamps are always written with `now()::text` on a UTC session.
 
 ### `listings`
 `external_id` (unique: `rf-<propertyId>`, `rf-rent-<rentalId>`, `demo-…`, `zillow-…`), `source` (redfin/zillow/demo), `address`, `unit`, `neighborhood` (town), `region`, `zip_code`, `lat/lng`, `bedrooms`, `bathrooms`, `sqft`, `lot_sqft`, `year_built`, `price`, `price_per_sqft` (sales, non-land), `hoa_fee`, `tax_annual`, `listing_status` (for_sale/pending/off_market), `listing_type` (House/Land/Multi-family/Condo/Townhouse/Manufactured/Apartment/Co-op/Other), `listing_category` (sale/rental), `days_on_market`, `listed_date`, `original_price`, `price_reduction_amount`, `price_reduction_pct`, `last_price_reduction_date`, `description`, `image_url`, `listing_url`, `available_at`, `off_market_at`, `price_delta_reported`, `first_seen_at`, `imported_at`.

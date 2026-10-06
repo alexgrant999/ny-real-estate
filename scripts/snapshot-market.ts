@@ -11,7 +11,7 @@
  *   totalInventory      number of sale listings
  *   rentalInventory     number of rentals
  *   daysOnMarket        median days on market, sales
- *   priceCutShare       fraction of sale listings with a recorded price cut (0–1)
+ *   priceCutShare       fraction of sale listings with a recorded price cut (0 to 1)
  *   medianLotAcres      median lot size of sale listings with a lot, in acres
  *
  * A metric is skipped when its sample is empty; counts of zero are written. Rows for the
@@ -21,11 +21,10 @@
  *   npx tsx scripts/snapshot-market.ts
  *   npx tsx scripts/snapshot-market.ts --period 2026-09
  */
-import Database from 'better-sqlite3';
-import type BetterSqlite3 from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import type { Sql } from 'postgres';
+import { getSql, closeSql } from '../src/lib/db';
 import { applySchema } from '../src/lib/schema';
+import { loadEnv } from './env';
 import { REGIONS, REGION_LABELS } from '../src/lib/areas';
 import { sqftToAcres } from '../src/lib/utils';
 
@@ -89,13 +88,41 @@ function metricsFor(rows: ActiveRow[]): Record<string, number> {
   return out;
 }
 
-export function snapshotMarket(db: BetterSqlite3.Database, period: string = currentPeriod()): number {
-  const rows = db.prepare(`
+export interface TrendRow {
+  area_name: string;
+  region: string;
+  area_type: string;
+  metric: string;
+  period: string;
+  value: number;
+}
+
+/**
+ * Upserts market_trends rows in batches. One INSERT cannot touch the same
+ * (area_name, metric, period) twice, so duplicates are collapsed first, last one wins,
+ * which is what row-by-row INSERT OR REPLACE did.
+ */
+export async function upsertTrends(sql: Sql, rows: TrendRow[]): Promise<void> {
+  const unique = [...new Map(rows.map(r => [`${r.area_name}\u0000${r.metric}\u0000${r.period}`, r])).values()];
+  for (let i = 0; i < unique.length; i += 1000) {
+    const chunk = unique.slice(i, i + 1000);
+    await sql`
+      INSERT INTO market_trends ${sql(chunk, 'area_name', 'region', 'area_type', 'metric', 'period', 'value')}
+      ON CONFLICT (area_name, metric, period) DO UPDATE SET
+        region = excluded.region,
+        area_type = excluded.area_type,
+        value = excluded.value
+    `;
+  }
+}
+
+export async function snapshotMarket(sql: Sql, period: string = currentPeriod()): Promise<number> {
+  const rows = await sql<ActiveRow[]>`
     SELECT neighborhood, region, listing_category, listing_type, price, price_per_sqft,
            days_on_market, price_reduction_amount, lot_sqft
     FROM listings
     WHERE listing_status = 'for_sale'
-  `).all() as ActiveRow[];
+  `;
 
   const areas: Area[] = [];
 
@@ -119,27 +146,24 @@ export function snapshotMarket(db: BetterSqlite3.Database, period: string = curr
     if (inRegion.length) areas.push({ area_name: REGION_LABELS[region], region, area_type: 'region', rows: inRegion });
   }
 
-  if (rows.length) areas.push({ area_name: 'Catskills', region: 'All', area_type: 'all', rows });
+  if (rows.length) areas.push({ area_name: 'Catskills', region: 'All', area_type: 'all', rows: [...rows] });
 
-  const insert = db.prepare(`
-    INSERT OR REPLACE INTO market_trends (area_name, region, area_type, metric, period, value)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
-  let written = 0;
-  db.transaction(() => {
-    for (const area of areas) {
-      for (const [metric, value] of Object.entries(metricsFor(area.rows))) {
-        insert.run(area.area_name, area.region, area.area_type, metric, period, value);
-        written++;
-      }
+  const out: TrendRow[] = [];
+  for (const area of areas) {
+    for (const [metric, value] of Object.entries(metricsFor(area.rows))) {
+      out.push({ area_name: area.area_name, region: area.region, area_type: area.area_type, metric, period, value });
     }
-  })();
+  }
 
-  return written;
+  await sql.begin(async tx => {
+    // TransactionSql loses the tagged-template call signature in postgres.js's types.
+    await upsertTrends(tx as unknown as Sql, out);
+  });
+
+  return out.length;
 }
 
-if (require.main === module) {
+if (process.argv[1]?.endsWith('snapshot-market.ts')) {
   const args = process.argv.slice(2);
   const periodArg = args.includes('--period') ? args[args.indexOf('--period') + 1] : undefined;
   if (periodArg && !/^\d{4}-\d{2}$/.test(periodArg)) {
@@ -147,18 +171,22 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  const DB_PATH = path.join(process.cwd(), 'data', 'apartments.db');
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  applySchema(db);
-
-  const period = periodArg ?? currentPeriod();
-  const written = snapshotMarket(db, period);
-  const { areas } = db.prepare(
-    'SELECT COUNT(DISTINCT area_name) as areas FROM market_trends WHERE period = ?'
-  ).get(period) as { areas: number };
-  console.log(`Market snapshot for ${period}: ${written} row(s) across ${areas} area(s).`);
-  db.close();
+  (async () => {
+    loadEnv();
+    const sql = getSql();
+    try {
+      await applySchema(sql);
+      const period = periodArg ?? currentPeriod();
+      const written = await snapshotMarket(sql, period);
+      const [{ areas }] = await sql<{ areas: number }[]>`
+        SELECT COUNT(DISTINCT area_name)::int AS areas FROM market_trends WHERE period = ${period}
+      `;
+      console.log(`Market snapshot for ${period}: ${written} row(s) across ${areas} area(s).`);
+    } finally {
+      await closeSql();
+    }
+  })().catch(e => {
+    console.error(e);
+    process.exit(1);
+  });
 }

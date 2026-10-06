@@ -24,7 +24,7 @@ function Row({ label, values }: { label: string; values: (string | React.ReactNo
 
 export default async function ComparePage({ searchParams }: PageProps) {
   const ids = (searchParams.ids ?? '').split(',').map(Number).filter(Boolean).slice(0, 4);
-  const listings = getListingsByIds(ids);
+  const listings = await getListingsByIds(ids);
 
   if (listings.length === 0) {
     return (

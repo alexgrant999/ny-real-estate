@@ -8,10 +8,10 @@ import { REGION_LABELS } from '@/lib/areas';
 import Link from 'next/link';
 
 export default async function ListingDetailPage({ params }: { params: { id: string } }) {
-  const listing = getListingById(Number(params.id));
+  const listing = await getListingById(Number(params.id));
   if (!listing) notFound();
 
-  const history = getPriceHistory(listing.id);
+  const history = await getPriceHistory(listing.id);
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">

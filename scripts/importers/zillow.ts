@@ -4,15 +4,15 @@
  * API: https://rapidapi.com/apimaker/api/zillow-com1
  *
  * Strategy (minimises requests):
- *  Phase 1 – propertyExtendedSearch by zip code (1 req per active town, ~40 listings each)
- *  Phase 2 – propertyDetails only for listings with no price history yet (new listings)
+ *  Phase 1: propertyExtendedSearch by zip code (1 req per active town, ~40 listings each)
+ *  Phase 2: propertyDetails only for listings with no price history yet (new listings)
  *
  * Free tier: 500 req/month. With ~21 active towns that is 21 search reqs + up to ~480
  * detail reqs. Run weekly and you'll stay well within limits.
  *
  * Needs RAPIDAPI_KEY in .env.local. Run through: npx tsx scripts/import.ts zillow
  */
-import type Database from 'better-sqlite3';
+import type { Sql } from 'postgres';
 import { TOWNS, type Region } from '../../src/lib/areas';
 import { acresToSqft } from '../../src/lib/utils';
 import type { ListingType } from '../../src/lib/types';
@@ -40,7 +40,7 @@ async function apiFetch(endpoint: string, params: Record<string, string>): Promi
   const url = `${BASE_URL}/${endpoint}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: HEADERS() });
 
-  if (res.status === 429) throw new Error('Rate limit hit – try again later');
+  if (res.status === 429) throw new Error('Rate limit hit, try again later');
   if (res.status === 403) throw new Error('Invalid API key or not subscribed to zillow-com1');
   if (!res.ok) throw new Error(`API error ${res.status}: ${res.statusText}`);
 
@@ -106,7 +106,7 @@ async function fetchDetails(zpid: string): Promise<Record<string, unknown>> {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-export async function importZillow(db: Database.Database, logId: number) {
+export async function importZillow(sql: Sql, logId: number) {
   if (!RAPIDAPI_KEY?.trim()) {
     throw new Error(
       'RAPIDAPI_KEY is not set.\n' +
@@ -116,45 +116,6 @@ export async function importZillow(db: Database.Database, logId: number) {
       '  4. Re-run the import'
     );
   }
-
-  const insertListing = db.prepare(`
-    INSERT INTO listings (
-      external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
-      bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
-      listing_status, listing_type, listing_category, days_on_market, listed_date,
-      last_price_reduction_date, original_price, price_reduction_amount, price_reduction_pct,
-      description, image_url, listing_url, first_seen_at, imported_at
-    ) VALUES (
-      @external_id, @source, @address, @unit, @neighborhood, @region, @zip_code, @lat, @lng,
-      @bedrooms, @bathrooms, @sqft, @lot_sqft, @year_built, @price, @price_per_sqft, @hoa_fee, @tax_annual,
-      @listing_status, @listing_type, 'sale', @days_on_market, @listed_date,
-      @last_price_reduction_date, @original_price, @price_reduction_amount, @price_reduction_pct,
-      @description, @image_url, @listing_url, @first_seen_at, @imported_at
-    )
-    ON CONFLICT(external_id) DO UPDATE SET
-      region          = excluded.region,
-      lot_sqft        = COALESCE(excluded.lot_sqft, listings.lot_sqft),
-      year_built      = COALESCE(excluded.year_built, listings.year_built),
-      price           = excluded.price,
-      price_per_sqft  = excluded.price_per_sqft,
-      days_on_market  = excluded.days_on_market,
-      listing_status  = excluded.listing_status,
-      off_market_at   = NULL,
-      last_price_reduction_date = excluded.last_price_reduction_date,
-      price_reduction_amount    = excluded.price_reduction_amount,
-      price_reduction_pct       = excluded.price_reduction_pct,
-      image_url       = excluded.image_url,
-      imported_at     = excluded.imported_at
-  `);
-
-  const insertHistory = db.prepare(`
-    INSERT OR IGNORE INTO price_history (listing_id, price, event_type, event_date)
-    VALUES (@listing_id, @price, @event_type, @event_date)
-  `);
-
-  const updateLog = db.prepare(`
-    UPDATE import_logs SET listings_added = ?, listings_updated = ? WHERE id = ?
-  `);
 
   const today = new Date().toISOString().slice(0, 10);
   let added = 0, updated = 0, reqCount = 0;
@@ -184,16 +145,18 @@ export async function importZillow(db: Database.Database, logId: number) {
 
   for (const { zpid, meta, searchData: s } of allResults) {
     const externalId = `zillow-${zpid}`;
-    const existing = db.prepare('SELECT id FROM listings WHERE external_id = ?').get(externalId) as { id: number } | undefined;
+    const [existing] = await sql<{ id: number }[]>`SELECT id FROM listings WHERE external_id = ${externalId}`;
 
-    const price = Number(s.price ?? s.unformattedPrice ?? 0);
-    const reductionRaw = parsePriceString(s.priceReduction as string);
+    // Postgres rejects fractional values for INTEGER columns, so every integer field is rounded.
+    const price = Math.round(Number(s.price ?? s.unformattedPrice ?? 0));
+    const reductionParsed = parsePriceString(s.priceReduction as string);
+    const reductionRaw = reductionParsed === null ? null : Math.round(reductionParsed);
     const originalPrice = reductionRaw && price ? price + reductionRaw : price;
     const reductionPct = reductionRaw && originalPrice > 0
       ? Math.round((reductionRaw / originalPrice) * 1000) / 10
       : null;
     const listingType = normaliseHomeType((s.propertyType as string | undefined) ?? (s.homeType as string | undefined));
-    const sqft = Number(s.livingArea ?? 0) || null;
+    const sqft = Math.round(Number(s.livingArea ?? 0)) || null;
     const pricePerSqft = sqft && price && listingType !== 'Land' ? Math.round(price / sqft) : null;
 
     const row = {
@@ -206,18 +169,18 @@ export async function importZillow(db: Database.Database, logId: number) {
       zip_code: String(s.zipcode ?? s.zip ?? (s.address as string)?.match(/\d{5}/)?.[0] ?? ''),
       lat: Number(s.latitude ?? s.lat ?? 0) || null,
       lng: Number(s.longitude ?? s.lon ?? 0) || null,
-      bedrooms: Number(s.bedrooms ?? s.beds ?? 0) || null,
+      bedrooms: Math.round(Number(s.bedrooms ?? s.beds ?? 0)) || null,
       bathrooms: Number(s.bathrooms ?? s.baths ?? 0) || null,
       sqft,
       lot_sqft: lotSqftFrom(s.lotAreaValue, s.lotAreaUnit),
-      year_built: Number(s.yearBuilt ?? 0) || null,
+      year_built: Math.round(Number(s.yearBuilt ?? 0)) || null,
       price,
       price_per_sqft: pricePerSqft,
       hoa_fee: null as number | null,
       tax_annual: null as number | null,
       listing_status: 'for_sale',
       listing_type: listingType,
-      days_on_market: Number(s.daysOnZillow ?? s.daysOnMarket ?? 0) || null,
+      days_on_market: Math.round(Number(s.daysOnZillow ?? s.daysOnMarket ?? 0)) || null,
       listed_date: (s.datePosted ?? null) as string | null,
       last_price_reduction_date: null as string | null,
       original_price: originalPrice !== price ? originalPrice : null,
@@ -230,7 +193,35 @@ export async function importZillow(db: Database.Database, logId: number) {
       imported_at: new Date().toISOString(),
     };
 
-    insertListing.run(row);
+    await sql`
+      INSERT INTO listings (
+        external_id, source, address, unit, neighborhood, region, zip_code, lat, lng,
+        bedrooms, bathrooms, sqft, lot_sqft, year_built, price, price_per_sqft, hoa_fee, tax_annual,
+        listing_status, listing_type, listing_category, days_on_market, listed_date,
+        last_price_reduction_date, original_price, price_reduction_amount, price_reduction_pct,
+        description, image_url, listing_url, first_seen_at, imported_at
+      ) VALUES (
+        ${row.external_id}, ${row.source}, ${row.address}, ${row.unit}, ${row.neighborhood}, ${row.region}, ${row.zip_code}, ${row.lat}, ${row.lng},
+        ${row.bedrooms}, ${row.bathrooms}, ${row.sqft}, ${row.lot_sqft}, ${row.year_built}, ${row.price}, ${row.price_per_sqft}, ${row.hoa_fee}, ${row.tax_annual},
+        ${row.listing_status}, ${row.listing_type}, 'sale', ${row.days_on_market}, ${row.listed_date},
+        ${row.last_price_reduction_date}, ${row.original_price}, ${row.price_reduction_amount}, ${row.price_reduction_pct},
+        ${row.description}, ${row.image_url}, ${row.listing_url}, ${row.first_seen_at}, ${row.imported_at}
+      )
+      ON CONFLICT (external_id) DO UPDATE SET
+        region          = excluded.region,
+        lot_sqft        = COALESCE(excluded.lot_sqft, listings.lot_sqft),
+        year_built      = COALESCE(excluded.year_built, listings.year_built),
+        price           = excluded.price,
+        price_per_sqft  = excluded.price_per_sqft,
+        days_on_market  = excluded.days_on_market,
+        listing_status  = excluded.listing_status,
+        off_market_at   = NULL,
+        last_price_reduction_date = excluded.last_price_reduction_date,
+        price_reduction_amount    = excluded.price_reduction_amount,
+        price_reduction_pct       = excluded.price_reduction_pct,
+        image_url       = excluded.image_url,
+        imported_at     = excluded.imported_at
+    `;
 
     if (existing) {
       updated++;
@@ -253,63 +244,61 @@ export async function importZillow(db: Database.Database, logId: number) {
         const p = await fetchDetails(zpid);
         reqCount++;
 
-        const listingRow = db.prepare('SELECT id, price FROM listings WHERE external_id = ?')
-          .get(`zillow-${zpid}`) as { id: number; price: number } | undefined;
+        const [listingRow] = await sql<{ id: number; price: number }[]>`
+          SELECT id, price FROM listings WHERE external_id = ${`zillow-${zpid}`}
+        `;
         if (!listingRow) { console.log('not found, skipping'); continue; }
 
         // Update detail fields
-        db.prepare(`
-          UPDATE listings SET
-            unit         = COALESCE(@unit, unit),
-            hoa_fee      = @hoa_fee,
-            tax_annual   = @tax_annual,
-            lot_sqft     = COALESCE(@lot_sqft, lot_sqft),
-            year_built   = COALESCE(@year_built, year_built),
-            description  = @description,
-            listed_date  = COALESCE(@listed_date, listed_date),
-            last_price_reduction_date = @last_price_reduction_date
-          WHERE id = @id
-        `).run({
-          id: listingRow.id,
+        const priceHistory = p.priceHistory as { price: number; event: string; date: string }[] | null;
+        const detail = {
           unit: (p.unit as string | null) ?? null,
-          hoa_fee: Number(p.hoaFee ?? 0) || null,
-          tax_annual: Number(p.annualTaxAmount ?? 0) || null,
+          hoa_fee: Math.round(Number(p.hoaFee ?? 0)) || null,
+          tax_annual: Math.round(Number(p.annualTaxAmount ?? 0)) || null,
           lot_sqft: lotSqftFrom(p.lotAreaValue, p.lotAreaUnit),
-          year_built: Number(p.yearBuilt ?? 0) || null,
+          year_built: Math.round(Number(p.yearBuilt ?? 0)) || null,
           description: (p.description as string | null) ?? null,
           listed_date: (p.datePosted as string | null) ?? null,
-          last_price_reduction_date: (
-            (p.priceHistory as { event: string; date: string }[] | null)
-              ?.find(h => h.event === 'Price cut')?.date ?? null
-          ),
-        });
+          last_price_reduction_date: priceHistory?.find(h => h.event === 'Price cut')?.date ?? null,
+        };
+        await sql`
+          UPDATE listings SET
+            unit         = COALESCE(${detail.unit}, unit),
+            hoa_fee      = ${detail.hoa_fee},
+            tax_annual   = ${detail.tax_annual},
+            lot_sqft     = COALESCE(${detail.lot_sqft}, lot_sqft),
+            year_built   = COALESCE(${detail.year_built}, year_built),
+            description  = ${detail.description},
+            listed_date  = COALESCE(${detail.listed_date}, listed_date),
+            last_price_reduction_date = ${detail.last_price_reduction_date}
+          WHERE id = ${listingRow.id}
+        `;
 
         // Insert price history events
-        const history = (p.priceHistory as { price: number; event: string; date: string }[] | null) ?? [];
+        const history = priceHistory ?? [];
         for (const event of history) {
           const eventType =
             event.event === 'Listed for sale' ? 'listed' :
             event.event === 'Price cut'       ? 'reduced' :
             event.event === 'Price increase'  ? 'increased' : 'relisted';
-          insertHistory.run({
-            listing_id: listingRow.id,
-            price: event.price,
-            event_type: eventType,
-            event_date: event.date,
-          });
+          await sql`
+            INSERT INTO price_history (listing_id, price, event_type, event_date)
+            VALUES (${listingRow.id}, ${Math.round(event.price)}, ${eventType}, ${event.date})
+            ON CONFLICT DO NOTHING
+          `;
         }
 
         // If no history from API, insert a synthetic "listed" event
         if (history.length === 0) {
-          const listedDate = db.prepare('SELECT listed_date FROM listings WHERE id = ?')
-            .get(listingRow.id) as { listed_date: string | null };
+          const [listedDate] = await sql<{ listed_date: string | null }[]>`
+            SELECT listed_date FROM listings WHERE id = ${listingRow.id}
+          `;
           if (listedDate?.listed_date) {
-            insertHistory.run({
-              listing_id: listingRow.id,
-              price: listingRow.price,
-              event_type: 'listed',
-              event_date: listedDate.listed_date,
-            });
+            await sql`
+              INSERT INTO price_history (listing_id, price, event_type, event_date)
+              VALUES (${listingRow.id}, ${listingRow.price}, 'listed', ${listedDate.listed_date})
+              ON CONFLICT DO NOTHING
+            `;
           }
         }
 
@@ -324,8 +313,8 @@ export async function importZillow(db: Database.Database, logId: number) {
     console.log(`  Fetched details for ${detailsDone}/${newZpids.length} new listings`);
   }
 
-  updateLog.run(added, updated, logId);
-  console.log(`\n✓ Zillow import complete — ${added} added, ${updated} updated, ${reqCount} API requests used`);
+  await sql`UPDATE import_logs SET listings_added = ${added}, listings_updated = ${updated} WHERE id = ${logId}`;
+  console.log(`\n✓ Zillow import complete: ${added} added, ${updated} updated, ${reqCount} API requests used`);
 }
 
 // ─── Quick test: verify key + connectivity ────────────────────────────────────
@@ -341,7 +330,7 @@ export async function testZillowKey(): Promise<{ ok: boolean; message: string }>
       home_type: 'Houses',
     }) as Record<string, unknown>;
     const count = ((data?.props ?? data?.results ?? []) as unknown[]).length;
-    return { ok: true, message: `Connected — got ${count} listings for Woodstock (12498)` };
+    return { ok: true, message: `Connected, got ${count} listings for Woodstock (12498)` };
   } catch (e) {
     return { ok: false, message: (e as Error).message };
   }

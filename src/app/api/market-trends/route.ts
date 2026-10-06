@@ -20,11 +20,11 @@ export async function GET(req: NextRequest) {
 
   if (action === 'areas') {
     const areaType = sp.get('areaType') || undefined;
-    return NextResponse.json(getMarketAreas(areaType));
+    return NextResponse.json(await getMarketAreas(areaType));
   }
 
   if (action === 'count') {
-    return NextResponse.json({ count: getMarketTrendCount() });
+    return NextResponse.json({ count: await getMarketTrendCount() });
   }
 
   const areaName = sp.get('area');
@@ -34,6 +34,6 @@ export async function GET(req: NextRequest) {
   const metrics = metricsParam ? metricsParam.split(',') : ALL_METRICS;
   const fromPeriod = sp.get('from') || undefined;
 
-  const rows = getMarketTrend(areaName, metrics, fromPeriod);
+  const rows = await getMarketTrend(areaName, metrics, fromPeriod);
   return NextResponse.json(rows);
 }

@@ -25,9 +25,11 @@ export default async function ListingsPage({ searchParams }: PageProps) {
     sortDir: (searchParams.sortDir as ListingFilters['sortDir']) || 'asc',
   };
 
-  const { listings, total } = getListings(filters);
-  const towns = getDistinctTowns();
-  const stats = getListingStats();
+  const [{ listings, total }, towns, stats] = await Promise.all([
+    getListings(filters),
+    getDistinctTowns(),
+    getListingStats(),
+  ]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-56px)]">
