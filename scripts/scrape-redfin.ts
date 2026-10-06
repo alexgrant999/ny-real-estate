@@ -169,9 +169,9 @@ async function insertHistory(q: Sql, listingId: number, price: number, eventType
 
 // Active Redfin sale listings whose detail payload has never been fetched: new ones first,
 // then anything a previous run skipped because of --details-limit.
-async function detailCandidates(): Promise<{ id: number; external_id: string; price: number; listed_date: string | null }[]> {
-  return sql<{ id: number; external_id: string; price: number; listed_date: string | null }[]>`
-    SELECT id, external_id, price, listed_date FROM listings
+async function detailCandidates(): Promise<{ id: number; external_id: string; price: number; listed_date: string | null; listing_url: string | null }[]> {
+  return sql<{ id: number; external_id: string; price: number; listed_date: string | null; listing_url: string | null }[]>`
+    SELECT id, external_id, price, listed_date, listing_url FROM listings
     WHERE source = 'redfin' AND listing_category = 'sale' AND listing_status = 'for_sale'
       AND details_fetched_at IS NULL
     ORDER BY first_seen_at DESC NULLS LAST, id DESC
@@ -412,15 +412,94 @@ async function searchTown(town: Town, category: 'sale' | 'rental'): Promise<Scra
 // ─── Details: MLS price history + taxes ───────────────────────────
 interface HistoryEvent { eventDescription?: string; price?: number; eventDate?: number }
 
-async function fetchDetails(propertyId: string, listingId: string | null): Promise<{ events: HistoryEvent[]; tax: number | null }> {
-  const params = new URLSearchParams({ propertyId, accessLevel: '1' });
-  if (listingId) params.set('listingId', listingId);
-  const data = await redfinJson(`${BASE}/stingray/api/home/details/belowTheFold?${params}`) as Dict;
-  const payload = (data.payload ?? {}) as Dict;
-  const events = ((payload.propertyHistoryInfo as Dict | undefined)?.events ?? []) as HistoryEvent[];
-  const taxInfo = ((payload.publicRecordsInfo as Dict | undefined)?.taxInfo ?? {}) as Dict;
-  const tax = num(taxInfo.taxesDue);
-  return { events, tax: tax ? Math.round(tax) : null };
+// The belowTheFold API answers 403 to every non-browser client since Oct 2026, with or
+// without cookies. The listing page itself still loads and carries the same payload
+// (propertyHistoryInfo events, taxesDue) escaped inside its inline server state, so the
+// details now come from the page.
+async function redfinPage(url: string): Promise<string> {
+  let lastError = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': SCRAPER_USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+    // 202 with an empty body is Redfin's soft rate limit on page requests.
+    if (res.status === 429 || res.status === 403 || res.status === 202 || res.status >= 500) {
+      lastError = `HTTP ${res.status}`;
+      const wait = attempt * 20_000;
+      console.log(`${lastError}, waiting ${wait / 1000}s (retry ${attempt}/3)...`);
+      await sleep(wait);
+      continue;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    const text = await res.text();
+    if (text.length < 1000) {
+      lastError = `empty page (${text.length} bytes)`;
+      const wait = attempt * 20_000;
+      console.log(`${lastError}, waiting ${wait / 1000}s (retry ${attempt}/3)...`);
+      await sleep(wait);
+      continue;
+    }
+    return text;
+  }
+  throw new Error(`Gave up after 3 attempts: ${lastError}`);
+}
+
+/** Balanced-bracket scan that ignores brackets inside JSON strings. */
+function scanJsonValue(s: string, start: number): string | null {
+  const open = s[start];
+  const close = open === '[' ? ']' : open === '{' ? '}' : null;
+  if (!close) return null;
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close && --depth === 0) return s.slice(start, i + 1);
+  }
+  return null;
+}
+
+/** The inline state is a JSON-encoded string: undo \uXXXX, \" and \\ escapes. */
+function unescapeBlob(s: string): string {
+  return s
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
+}
+
+async function fetchDetails(listingUrl: string): Promise<{ events: HistoryEvent[]; tax: number | null }> {
+  const html = await redfinPage(listingUrl);
+
+  let events: HistoryEvent[] = [];
+  const histAt = html.indexOf('\\"propertyHistoryInfo\\":');
+  if (histAt !== -1) {
+    const chunk = unescapeBlob(html.slice(histAt, histAt + 400_000));
+    const evAt = chunk.indexOf('"events":');
+    if (evAt !== -1) {
+      const arr = scanJsonValue(chunk, chunk.indexOf('[', evAt));
+      if (arr) {
+        try {
+          events = JSON.parse(arr) as HistoryEvent[];
+        } catch {
+          // A malformed extraction just means no history this run; the listing stays
+          // in the backlog only if we also fail below, so fall through quietly.
+        }
+      }
+    }
+  }
+
+  const taxMatch = html.match(/\\"taxesDue\\":(\d+(?:\.\d+)?)/);
+  const tax = taxMatch ? Math.round(Number(taxMatch[1])) : null;
+  return { events, tax };
 }
 
 /** Keep the current listing cycle: everything from the most recent "Listed" event onward. */
@@ -568,7 +647,6 @@ async function main() {
   for (const n of newSales) {
     await insertHistory(sql, n.id, n.price, 'listed', n.listedDate ?? today);
   }
-  const listingIds = new Map(newSales.map(n => [n.id, n.listingId]));
   const candidates = noDetails ? [] : await detailCandidates();
   const batch = candidates.slice(0, detailsLimit);
   if (batch.length) {
@@ -576,8 +654,12 @@ async function main() {
     for (const c of batch) {
       const propertyId = c.external_id.replace(/^rf-/, '');
       process.stdout.write(`  ${propertyId}... `);
+      if (!c.listing_url || !c.listing_url.includes('redfin.com')) {
+        console.log('no Redfin page URL, skipped');
+        continue;
+      }
       try {
-        const { events, tax } = await fetchDetails(propertyId, listingIds.get(c.id) ?? null);
+        const { events, tax } = await fetchDetails(c.listing_url);
         const cycle = currentCycle(events);
         await sql.begin(async tx => {
           const q = tx as unknown as Sql;
